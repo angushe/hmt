@@ -36,13 +36,14 @@ func run() error {
 		return updatePricing()
 	}
 
-	by := flag.String("by", "day", "aggregation: day, session, project")
+	by := flag.String("by", "day", "aggregation: day, week, month, session, project")
 	since := flag.String("since", "", "start date YYYY-MM-DD")
 	until := flag.String("until", "", "end date YYYY-MM-DD")
 	last := flag.String("last", "", "recent period: 7d, 30d, 3m")
 	model := flag.String("model", "", "filter by model name")
 	project := flag.String("project", "", "filter by project (fuzzy match)")
 	format := flag.String("format", "table", "output: table, json, csv")
+	tz := flag.String("timezone", "", "timezone for date grouping (e.g., Asia/Shanghai, UTC)")
 	flag.Parse()
 
 	if *last != "" && (*since != "" || *until != "") {
@@ -78,12 +79,26 @@ func run() error {
 	switch *by {
 	case "day":
 		groupBy = report.ByDay
+	case "week":
+		groupBy = report.ByWeek
+	case "month":
+		groupBy = report.ByMonth
 	case "session":
 		groupBy = report.BySession
 	case "project":
 		groupBy = report.ByProject
 	default:
-		return fmt.Errorf("invalid --by value %q: use day, session, or project", *by)
+		return fmt.Errorf("invalid --by value %q: use day, week, month, session, or project", *by)
+	}
+
+	// Resolve timezone
+	loc := time.Local
+	if *tz != "" {
+		var err error
+		loc, err = time.LoadLocation(*tz)
+		if err != nil {
+			return fmt.Errorf("invalid --timezone %q: %w", *tz, err)
+		}
 	}
 
 	home, err := os.UserHomeDir()
@@ -116,7 +131,7 @@ func run() error {
 		return nil
 	}
 
-	rows := report.Aggregate(filtered, groupBy)
+	rows := report.Aggregate(filtered, groupBy, loc)
 	report.ComputeCosts(rows, table)
 
 	switch *format {

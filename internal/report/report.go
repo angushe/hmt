@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
 
@@ -22,6 +24,8 @@ type GroupBy int
 
 const (
 	ByDay GroupBy = iota
+	ByWeek
+	ByMonth
 	BySession
 	ByProject
 )
@@ -61,7 +65,11 @@ func Filter(records []parser.Record, since, until *time.Time, model, project str
 }
 
 // Aggregate groups records by the given dimension + model and sums tokens.
-func Aggregate(records []parser.Record, by GroupBy) []Row {
+// loc is used for day/week/month boundaries. If nil, time.Local is used.
+func Aggregate(records []parser.Record, by GroupBy, loc *time.Location) []Row {
+	if loc == nil {
+		loc = time.Local
+	}
 	type aggKey struct {
 		key   string
 		model string
@@ -71,9 +79,15 @@ func Aggregate(records []parser.Record, by GroupBy) []Row {
 
 	for _, r := range records {
 		var k string
+		local := r.Timestamp.In(loc)
 		switch by {
 		case ByDay:
-			k = r.Timestamp.Format("2006-01-02")
+			k = local.Format("2006-01-02")
+		case ByWeek:
+			year, week := local.ISOWeek()
+			k = fmt.Sprintf("%d-W%02d", year, week)
+		case ByMonth:
+			k = local.Format("2006-01")
 		case BySession:
 			k = r.SessionID
 		case ByProject:
@@ -120,8 +134,21 @@ func ComputeCosts(rows []Row, table *pricing.Table) {
 	}
 }
 
-// FormatTable writes an ASCII table to w.
+// colorEnabled returns true if the writer is stdout and color is not disabled.
+func colorEnabled(w io.Writer) bool {
+	if f, ok := w.(*os.File); ok {
+		return f == os.Stdout && color.NoColor == false
+	}
+	return false
+}
+
+// FormatTable writes an ASCII table to w with optional color.
 func FormatTable(w io.Writer, rows []Row, keyName string) {
+	useColor := colorEnabled(w)
+	costColor := color.New(color.FgGreen)
+	dimColor := color.New(color.FgHiBlack)
+	boldColor := color.New(color.Bold)
+
 	table := tablewriter.NewTable(w,
 		tablewriter.WithHeader([]string{keyName, "Model", "Input", "Output", "Cache Write", "Cache Read", "Cost"}),
 		tablewriter.WithHeaderAlignment(tw.AlignLeft),
@@ -135,14 +162,26 @@ func FormatTable(w io.Writer, rows []Row, keyName string) {
 	for _, r := range rows {
 		cost := "N/A"
 		if r.HasCost {
-			cost = fmt.Sprintf("$%.2f", r.Cost)
+			costVal := fmt.Sprintf("$%.2f", r.Cost)
+			if useColor {
+				cost = costColor.Sprint(costVal)
+			} else {
+				cost = costVal
+			}
 			totalCost += r.Cost
 		} else {
 			allHaveCost = false
+			if useColor {
+				cost = dimColor.Sprint("N/A")
+			}
+		}
+		model := r.Model
+		if useColor {
+			model = dimColor.Sprint(model)
 		}
 		table.Append([]string{
 			r.Key,
-			r.Model,
+			model,
 			formatInt(r.InputTokens),
 			formatInt(r.OutputTokens),
 			formatInt(r.CacheWriteTokens),
@@ -159,7 +198,12 @@ func FormatTable(w io.Writer, rows []Row, keyName string) {
 	if !allHaveCost {
 		costStr += "*"
 	}
-	table.Footer([]string{"Total", "", formatInt(totalIn), formatInt(totalOut), formatInt(totalCW), formatInt(totalCR), costStr})
+	totalLabel := "Total"
+	if useColor {
+		costStr = boldColor.Sprint(costStr)
+		totalLabel = boldColor.Sprint(totalLabel)
+	}
+	table.Footer([]string{totalLabel, "", formatInt(totalIn), formatInt(totalOut), formatInt(totalCW), formatInt(totalCR), costStr})
 	table.Render()
 }
 

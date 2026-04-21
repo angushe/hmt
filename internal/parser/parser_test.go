@@ -8,7 +8,7 @@ import (
 )
 
 func TestParseLine_AssistantWithUsage(t *testing.T) {
-	line := `{"type":"assistant","sessionId":"sess-1","requestId":"req-1","parentUuid":"p-1","timestamp":"2026-04-20T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}`
+	line := `{"type":"assistant","sessionId":"sess-1","requestId":"req-1","parentUuid":"p-1","timestamp":"2026-04-20T10:00:00.000Z","message":{"id":"msg-1","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}`
 	rec, ok := ParseLine([]byte(line))
 	if !ok {
 		t.Fatal("expected ok=true for assistant line")
@@ -33,6 +33,9 @@ func TestParseLine_AssistantWithUsage(t *testing.T) {
 	}
 	if rec.RequestID != "req-1" {
 		t.Errorf("requestId = %q, want req-1", rec.RequestID)
+	}
+	if rec.MessageID != "msg-1" {
+		t.Errorf("messageId = %q, want msg-1", rec.MessageID)
 	}
 	expectedTime := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
 	if !rec.Timestamp.Equal(expectedTime) {
@@ -64,22 +67,32 @@ func TestParseLine_FileHistorySnapshot(t *testing.T) {
 }
 
 func TestDedup(t *testing.T) {
+	// First-seen strategy: keep the first occurrence, discard later duplicates
 	records := []Record{
-		{RequestID: "req-1", OutputTokens: 33, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
-		{RequestID: "req-1", OutputTokens: 33, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
-		{RequestID: "req-1", OutputTokens: 162, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
-		{RequestID: "req-2", OutputTokens: 42, InputTokens: 5, CacheWriteTokens: 200, CacheReadTokens: 80},
-		{RequestID: "req-2", OutputTokens: 311, InputTokens: 5, CacheWriteTokens: 200, CacheReadTokens: 80},
+		{MessageID: "msg-1", RequestID: "req-1", OutputTokens: 33, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
+		{MessageID: "msg-1", RequestID: "req-1", OutputTokens: 33, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
+		{MessageID: "msg-1", RequestID: "req-1", OutputTokens: 162, InputTokens: 3, CacheWriteTokens: 100, CacheReadTokens: 50},
+		{MessageID: "msg-2", RequestID: "req-2", OutputTokens: 42, InputTokens: 5, CacheWriteTokens: 200, CacheReadTokens: 80},
+		{MessageID: "msg-2", RequestID: "req-2", OutputTokens: 311, InputTokens: 5, CacheWriteTokens: 200, CacheReadTokens: 80},
 	}
 	deduped := Dedup(records)
 	if len(deduped) != 2 {
 		t.Fatalf("len = %d, want 2", len(deduped))
 	}
-	if deduped[0].OutputTokens != 162 {
-		t.Errorf("first output_tokens = %d, want 162", deduped[0].OutputTokens)
+	// First-seen: keeps first chunk (output=33), not last (output=162)
+	if deduped[0].OutputTokens != 33 {
+		t.Errorf("first output_tokens = %d, want 33", deduped[0].OutputTokens)
 	}
-	if deduped[1].OutputTokens != 311 {
-		t.Errorf("second output_tokens = %d, want 311", deduped[1].OutputTokens)
+	if deduped[1].OutputTokens != 42 {
+		t.Errorf("second output_tokens = %d, want 42", deduped[1].OutputTokens)
+	}
+}
+
+func TestParseLine_Synthetic(t *testing.T) {
+	line := `{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"id":"msg-1","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
+	_, ok := ParseLine([]byte(line))
+	if ok {
+		t.Fatal("expected ok=false for <synthetic> model")
 	}
 }
 
@@ -120,10 +133,10 @@ func TestScanDir(t *testing.T) {
 	}
 
 	lines := []string{
-		`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`,
-		`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:01.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":150,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`,
+		`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`,
+		`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:01.000Z","message":{"id":"m1","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":150,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}`,
 		`{"type":"user","sessionId":"s1","timestamp":"2026-04-20T10:00:02.000Z","message":{"role":"user","content":"hi"}}`,
-		`{"type":"assistant","sessionId":"s1","requestId":"r2","timestamp":"2026-04-20T10:01:00.000Z","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":100}}}`,
+		`{"type":"assistant","sessionId":"s1","requestId":"r2","timestamp":"2026-04-20T10:01:00.000Z","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":100}}}`,
 	}
 	data := ""
 	for _, l := range lines {
@@ -140,8 +153,9 @@ func TestScanDir(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("len = %d, want 2", len(records))
 	}
-	if records[0].OutputTokens != 150 {
-		t.Errorf("first output = %d, want 150", records[0].OutputTokens)
+	// First-seen dedup: keeps first streaming chunk (output=50), not last (output=150)
+	if records[0].OutputTokens != 50 {
+		t.Errorf("first output = %d, want 50", records[0].OutputTokens)
 	}
 	if records[0].ProjectDir != "-Users-angus-project-test" {
 		t.Errorf("projectDir = %q, want -Users-angus-project-test", records[0].ProjectDir)
@@ -159,7 +173,7 @@ func TestScanDir_Subagents(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	topLine := `{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}` + "\n"
+	topLine := `{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}` + "\n"
 	if err := os.WriteFile(filepath.Join(projDir, "session.jsonl"), []byte(topLine), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +183,7 @@ func TestScanDir_Subagents(t *testing.T) {
 	if err := os.MkdirAll(subDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	subLine := `{"type":"assistant","sessionId":"s2","requestId":"r2","timestamp":"2026-04-20T11:00:00.000Z","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":100}}}` + "\n"
+	subLine := `{"type":"assistant","sessionId":"s2","requestId":"r2","timestamp":"2026-04-20T11:00:00.000Z","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":100}}}` + "\n"
 	if err := os.WriteFile(filepath.Join(subDir, "agent-xxx.jsonl"), []byte(subLine), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ type Record struct {
 	Model            string
 	SessionID        string
 	RequestID        string
+	MessageID        string // API response message ID, used for dedup
 	Timestamp        time.Time
 	InputTokens      int64
 	OutputTokens     int64
@@ -30,6 +31,7 @@ type jsonLine struct {
 	ParentUUID string `json:"parentUuid"`
 	Timestamp  string `json:"timestamp"`
 	Message    struct {
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage struct {
 			InputTokens      int64 `json:"input_tokens"`
@@ -40,39 +42,32 @@ type jsonLine struct {
 	} `json:"message"`
 }
 
-// Dedup removes streaming duplicates. Records sharing the same RequestID
-// are collapsed to the one with the highest OutputTokens.
-// Records with an empty RequestID are kept as-is.
+// Dedup removes streaming duplicates using first-seen strategy.
+// The dedup key is "messageId:requestId". The first occurrence is kept,
+// subsequent duplicates are discarded. Records without both IDs are kept as-is.
 func Dedup(records []Record) []Record {
-	type best struct {
-		index  int
-		output int64
-	}
-	seen := make(map[string]best)
-	var order []string
-
-	var noID []Record
-	for i, r := range records {
-		if r.RequestID == "" {
-			noID = append(noID, r)
+	seen := make(map[string]struct{})
+	result := make([]Record, 0, len(records))
+	for _, r := range records {
+		hash := dedupHash(r)
+		if hash == "" {
+			result = append(result, r)
 			continue
 		}
-		if prev, ok := seen[r.RequestID]; ok {
-			if r.OutputTokens > prev.output {
-				seen[r.RequestID] = best{index: i, output: r.OutputTokens}
-			}
-		} else {
-			seen[r.RequestID] = best{index: i, output: r.OutputTokens}
-			order = append(order, r.RequestID)
+		if _, ok := seen[hash]; ok {
+			continue
 		}
+		seen[hash] = struct{}{}
+		result = append(result, r)
 	}
-
-	result := make([]Record, 0, len(order)+len(noID))
-	for _, reqID := range order {
-		result = append(result, records[seen[reqID].index])
-	}
-	result = append(result, noID...)
 	return result
+}
+
+func dedupHash(r Record) string {
+	if r.MessageID == "" || r.RequestID == "" {
+		return ""
+	}
+	return r.MessageID + ":" + r.RequestID
 }
 
 // ProjectName derives a short display name from the Claude Code project
@@ -175,12 +170,16 @@ func parseFile(path string, projDir string) ([]Record, error) {
 
 // ParseLine parses a single JSONL line. Returns the record and true if it is
 // a usable assistant line, or zero value and false otherwise.
+// Lines with model "<synthetic>" are skipped.
 func ParseLine(data []byte) (Record, bool) {
 	var jl jsonLine
 	if err := json.Unmarshal(data, &jl); err != nil {
 		return Record{}, false
 	}
 	if jl.Type != "assistant" {
+		return Record{}, false
+	}
+	if jl.Message.Model == "<synthetic>" {
 		return Record{}, false
 	}
 	ts, err := time.Parse(time.RFC3339Nano, jl.Timestamp)
@@ -194,6 +193,7 @@ func ParseLine(data []byte) (Record, bool) {
 		Model:            jl.Message.Model,
 		SessionID:        jl.SessionID,
 		RequestID:        jl.RequestID,
+		MessageID:        jl.Message.ID,
 		Timestamp:        ts,
 		InputTokens:      jl.Message.Usage.InputTokens,
 		OutputTokens:     jl.Message.Usage.OutputTokens,

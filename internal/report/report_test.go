@@ -22,7 +22,7 @@ func makeRecords() []parser.Record {
 }
 
 func TestAggregateByDay(t *testing.T) {
-	rows := Aggregate(makeRecords(), ByDay)
+	rows := Aggregate(makeRecords(), ByDay, time.UTC)
 	if len(rows) != 2 {
 		t.Fatalf("len = %d, want 2", len(rows))
 	}
@@ -42,16 +42,39 @@ func TestAggregateByDay(t *testing.T) {
 }
 
 func TestAggregateBySession(t *testing.T) {
-	rows := Aggregate(makeRecords(), BySession)
+	rows := Aggregate(makeRecords(), BySession, nil)
 	if len(rows) != 2 {
 		t.Fatalf("len = %d, want 2", len(rows))
 	}
 }
 
 func TestAggregateByProject(t *testing.T) {
-	rows := Aggregate(makeRecords(), ByProject)
+	rows := Aggregate(makeRecords(), ByProject, nil)
 	if len(rows) != 2 {
 		t.Fatalf("len = %d, want 2", len(rows))
+	}
+}
+
+func TestAggregateByWeek(t *testing.T) {
+	rows := Aggregate(makeRecords(), ByWeek, time.UTC)
+	// Both dates (Apr 20 Sun and Apr 21 Mon) are in different ISO weeks
+	// Apr 20 2026 is Sunday → ISO week 16, Apr 21 is Monday → ISO week 17
+	if len(rows) != 2 {
+		t.Fatalf("len = %d, want 2", len(rows))
+	}
+	if rows[0].Key != "2026-W17" {
+		t.Errorf("row0 key = %q, want 2026-W17", rows[0].Key)
+	}
+}
+
+func TestAggregateByMonth(t *testing.T) {
+	rows := Aggregate(makeRecords(), ByMonth, time.UTC)
+	// All records are in April 2026
+	if len(rows) != 2 {
+		t.Fatalf("len = %d, want 2 (two models)", len(rows))
+	}
+	if rows[0].Key != "2026-04" {
+		t.Errorf("row0 key = %q, want 2026-04", rows[0].Key)
 	}
 }
 
