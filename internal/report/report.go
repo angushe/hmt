@@ -5,15 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
-	"github.com/olekukonko/tablewriter"
-	"github.com/olekukonko/tablewriter/tw"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 
 	"github.com/angus/hmt/internal/parser"
 	"github.com/angus/hmt/internal/pricing"
@@ -134,54 +132,47 @@ func ComputeCosts(rows []Row, table *pricing.Table) {
 	}
 }
 
-// colorEnabled returns true if the writer is stdout and color is not disabled.
-func colorEnabled(w io.Writer) bool {
-	if f, ok := w.(*os.File); ok {
-		return f == os.Stdout && color.NoColor == false
-	}
-	return false
-}
-
-// FormatTable writes an ASCII table to w with optional color.
+// FormatTable writes a styled ASCII table to w with group separators.
 func FormatTable(w io.Writer, rows []Row, keyName string) {
-	useColor := colorEnabled(w)
-	costColor := color.New(color.FgGreen)
-	dimColor := color.New(color.FgHiBlack)
-	boldColor := color.New(color.Bold)
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.AppendHeader(table.Row{keyName, "Model", "Input", "Output", "Cache Write", "Cache Read", "Cost"})
 
-	table := tablewriter.NewTable(w,
-		tablewriter.WithHeader([]string{keyName, "Model", "Input", "Output", "Cache Write", "Cache Read", "Cost"}),
-		tablewriter.WithHeaderAlignment(tw.AlignLeft),
-		tablewriter.WithRowAlignment(tw.AlignRight),
-	)
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignLeft, Colors: text.Colors{text.FgHiBlack}},
+		{Number: 3, Align: text.AlignRight},
+		{Number: 4, Align: text.AlignRight},
+		{Number: 5, Align: text.AlignRight},
+		{Number: 6, Align: text.AlignRight},
+		{Number: 7, Align: text.AlignRight, Colors: text.Colors{text.FgGreen}, ColorsFooter: text.Colors{text.Bold}},
+	})
+
+	t.SetStyle(table.StyleLight)
 
 	var totalIn, totalOut, totalCW, totalCR int64
 	var totalCost float64
 	allHaveCost := true
 
+	needsSeparator := keyName == "day" || keyName == "week" || keyName == "month"
+	prevKey := ""
+
 	for _, r := range rows {
+		if needsSeparator && prevKey != "" && r.Key != prevKey {
+			t.AppendSeparator()
+		}
+		prevKey = r.Key
+
 		cost := "N/A"
 		if r.HasCost {
-			costVal := fmt.Sprintf("$%.2f", r.Cost)
-			if useColor {
-				cost = costColor.Sprint(costVal)
-			} else {
-				cost = costVal
-			}
+			cost = fmt.Sprintf("$%.2f", r.Cost)
 			totalCost += r.Cost
 		} else {
 			allHaveCost = false
-			if useColor {
-				cost = dimColor.Sprint("N/A")
-			}
 		}
-		model := r.Model
-		if useColor {
-			model = dimColor.Sprint(model)
-		}
-		table.Append([]string{
+		t.AppendRow(table.Row{
 			r.Key,
-			model,
+			r.Model,
 			formatInt(r.InputTokens),
 			formatInt(r.OutputTokens),
 			formatInt(r.CacheWriteTokens),
@@ -198,13 +189,8 @@ func FormatTable(w io.Writer, rows []Row, keyName string) {
 	if !allHaveCost {
 		costStr += "*"
 	}
-	totalLabel := "Total"
-	if useColor {
-		costStr = boldColor.Sprint(costStr)
-		totalLabel = boldColor.Sprint(totalLabel)
-	}
-	table.Footer([]string{totalLabel, "", formatInt(totalIn), formatInt(totalOut), formatInt(totalCW), formatInt(totalCR), costStr})
-	table.Render()
+	t.AppendFooter(table.Row{"Total", "", formatInt(totalIn), formatInt(totalOut), formatInt(totalCW), formatInt(totalCR), costStr})
+	t.Render()
 }
 
 // FormatJSON writes rows as a JSON array to w.
