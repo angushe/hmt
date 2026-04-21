@@ -1,2 +1,4 @@
 hmt
 *.exe
+docs/superpowers/
+.worktrees/
