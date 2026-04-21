@@ -154,12 +154,13 @@ func FormatTable(w io.Writer, rows []Row, keyName string) {
 	var totalCost float64
 	allHaveCost := true
 
-	needsSeparator := keyName == "day" || keyName == "week" || keyName == "month"
+	mergeKey := keyName == "day" || keyName == "week" || keyName == "month"
 	prevKey := ""
 
 	for _, r := range rows {
-		if needsSeparator && prevKey != "" && r.Key != prevKey {
-			t.AppendSeparator()
+		displayKey := r.Key
+		if mergeKey && r.Key == prevKey {
+			displayKey = ""
 		}
 		prevKey = r.Key
 
@@ -171,7 +172,7 @@ func FormatTable(w io.Writer, rows []Row, keyName string) {
 			allHaveCost = false
 		}
 		t.AppendRow(table.Row{
-			r.Key,
+			displayKey,
 			r.Model,
 			formatInt(r.InputTokens),
 			formatInt(r.OutputTokens),
