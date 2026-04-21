@@ -110,8 +110,9 @@ func splitDirName(dir string) []string {
 	return parts
 }
 
-// ScanDir reads all .jsonl files under baseDir/*/,
-// parses assistant lines, deduplicates, and returns records.
+// ScanDir recursively reads all .jsonl files under baseDir/*/,
+// including subagent logs in nested directories.
+// It parses assistant lines, deduplicates, and returns records.
 func ScanDir(baseDir string) ([]Record, error) {
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
@@ -123,18 +124,25 @@ func ScanDir(baseDir string) ([]Record, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		projPath := filepath.Join(baseDir, entry.Name())
-		files, err := filepath.Glob(filepath.Join(projPath, "*.jsonl"))
-		if err != nil {
-			continue
-		}
-		for _, fpath := range files {
-			records, err := parseFile(fpath, entry.Name())
+		projName := entry.Name()
+		projPath := filepath.Join(baseDir, projName)
+		err := filepath.WalkDir(projPath, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil // skip inaccessible paths
+			}
+			if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+				return nil
+			}
+			records, err := parseFile(path, projName)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-				continue
+				return nil
 			}
 			allRecords = append(allRecords, records...)
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: walking %s: %v\n", projPath, err)
 		}
 	}
 

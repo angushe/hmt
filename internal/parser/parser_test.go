@@ -150,3 +150,36 @@ func TestScanDir(t *testing.T) {
 		t.Errorf("second model = %q, want claude-haiku-4-5", records[1].Model)
 	}
 }
+
+func TestScanDir_Subagents(t *testing.T) {
+	tmp := t.TempDir()
+	projDir := filepath.Join(tmp, "-Users-angus-project-test")
+
+	// Top-level session JSONL
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	topLine := `{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-04-20T10:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(projDir, "session.jsonl"), []byte(topLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nested subagent JSONL
+	subDir := filepath.Join(projDir, "abc-session-uuid", "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subLine := `{"type":"assistant","sessionId":"s2","requestId":"r2","timestamp":"2026-04-20T11:00:00.000Z","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":100}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(subDir, "agent-xxx.jsonl"), []byte(subLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := ScanDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should find both top-level and subagent records
+	if len(records) != 2 {
+		t.Fatalf("len = %d, want 2 (top-level + subagent)", len(records))
+	}
+}
