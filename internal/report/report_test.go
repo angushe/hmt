@@ -1,6 +1,9 @@
 package report
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +94,51 @@ func TestComputeCosts(t *testing.T) {
 	expected := 11.625
 	if rows[0].Cost < expected-0.001 || rows[0].Cost > expected+0.001 {
 		t.Errorf("cost = %f, want %f", rows[0].Cost, expected)
+	}
+}
+
+func sampleRows() []Row {
+	return []Row{
+		{Key: "2026-04-20", Model: "claude-opus-4-6", InputTokens: 1000, OutputTokens: 500, CacheWriteTokens: 200, CacheReadTokens: 300, Cost: 0.021, HasCost: true},
+		{Key: "2026-04-19", Model: "claude-haiku-4-5", InputTokens: 2000, OutputTokens: 800, CacheWriteTokens: 0, CacheReadTokens: 100, Cost: 0.006, HasCost: true},
+	}
+}
+
+func TestFormatTable(t *testing.T) {
+	var buf bytes.Buffer
+	FormatTable(&buf, sampleRows(), "day")
+	out := buf.String()
+	if !strings.Contains(out, "2026-04-20") {
+		t.Errorf("table output missing date:\n%s", out)
+	}
+	if !strings.Contains(out, "claude-opus-4-6") {
+		t.Errorf("table output missing model:\n%s", out)
+	}
+	if !strings.Contains(out, "$0.02") {
+		t.Errorf("table output missing cost:\n%s", out)
+	}
+}
+
+func TestFormatJSON(t *testing.T) {
+	var buf bytes.Buffer
+	FormatJSON(&buf, sampleRows(), "day")
+	var parsed []map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("len = %d, want 2", len(parsed))
+	}
+}
+
+func TestFormatCSV(t *testing.T) {
+	var buf bytes.Buffer
+	FormatCSV(&buf, sampleRows(), "day")
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines = %d, want 3", len(lines))
+	}
+	if !strings.HasPrefix(lines[0], "day,") {
+		t.Errorf("header = %q, expected to start with 'day,'", lines[0])
 	}
 }
