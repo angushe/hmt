@@ -22,6 +22,12 @@ import (
 //go:embed pricing_fallback.json
 var fallbackPricing []byte
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 const litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 func main() {
@@ -32,6 +38,11 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Printf("hmt %s (%s, %s)\n", version, commit, buildDate)
+		return nil
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "update-pricing" {
 		return updatePricing()
 	}
