@@ -3,7 +3,11 @@ package pricing
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 // ModelPricing holds per-token costs for a single model.
@@ -62,6 +66,77 @@ func Load(cachedPath string, fallbackData []byte) (*Table, error) {
 		fmt.Fprintf(os.Stderr, "warning: cached pricing invalid, using fallback: %v\n", err)
 	}
 	return LoadFromJSON(fallbackData)
+}
+
+// isFresh returns true if the file at path exists and was modified less than maxAge ago.
+func isFresh(path string, maxAge time.Duration) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) < maxAge
+}
+
+// fetchAndFilter downloads the full LiteLLM pricing JSON from url,
+// filters to Anthropic models, and writes the result to outPath.
+// Creates parent directories as needed.
+func fetchAndFilter(url, outPath string) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("fetching pricing: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetching pricing: status %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading pricing response: %w", err)
+	}
+
+	type rawEntry struct {
+		Provider               string  `json:"litellm_provider"`
+		InputCostPerToken      float64 `json:"input_cost_per_token"`
+		OutputCostPerToken     float64 `json:"output_cost_per_token"`
+		CacheWriteCostPerToken float64 `json:"cache_creation_input_token_cost"`
+		CacheReadCostPerToken  float64 `json:"cache_read_input_token_cost"`
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("parsing pricing JSON: %w", err)
+	}
+
+	filtered := make(map[string]jsonEntry)
+	for name, rawVal := range raw {
+		var e rawEntry
+		if err := json.Unmarshal(rawVal, &e); err != nil {
+			continue
+		}
+		if e.Provider != "anthropic" {
+			continue
+		}
+		filtered[name] = jsonEntry{
+			InputCostPerToken:      e.InputCostPerToken,
+			OutputCostPerToken:     e.OutputCostPerToken,
+			CacheWriteCostPerToken: e.CacheWriteCostPerToken,
+			CacheReadCostPerToken:  e.CacheReadCostPerToken,
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return fmt.Errorf("creating cache dir: %w", err)
+	}
+
+	out, err := json.MarshalIndent(filtered, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling pricing: %w", err)
+	}
+
+	return os.WriteFile(outPath, out, 0o644)
 }
 
 // Cost calculates the total cost for the given token counts and model pricing.
