@@ -1,12 +1,8 @@
 package main
 
 import (
-	_ "embed"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,16 +15,11 @@ import (
 	"github.com/angushe/hmt/internal/report"
 )
 
-//go:embed pricing_fallback.json
-var fallbackPricing []byte
-
 var (
 	version   = "dev"
 	commit    = "unknown"
 	buildDate = "unknown"
 )
-
-const litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 func main() {
 	if err := run(); err != nil {
@@ -41,10 +32,6 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Printf("hmt %s (%s, %s)\n", version, commit, buildDate)
 		return nil
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "update-pricing" {
-		return updatePricing()
 	}
 
 	by := flag.String("by", "day", "aggregation: day, week, month, session, project")
@@ -173,81 +160,4 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(n) * 30 * 24 * time.Hour, nil
 	}
 	return 0, fmt.Errorf("unexpected unit %q", m[2])
-}
-
-func updatePricing() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	configDir := filepath.Join(home, ".config", "hmt")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return fmt.Errorf("creating config dir: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "fetching pricing from LiteLLM...\n")
-	resp, err := http.Get(litellmURL)
-	if err != nil {
-		return fmt.Errorf("fetching pricing: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response: %w", err)
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return fmt.Errorf("parsing LiteLLM JSON: %w", err)
-	}
-
-	type entry struct {
-		Provider               string  `json:"litellm_provider"`
-		InputCostPerToken      float64 `json:"input_cost_per_token"`
-		OutputCostPerToken     float64 `json:"output_cost_per_token"`
-		CacheWriteCostPerToken float64 `json:"cache_creation_input_token_cost"`
-		CacheReadCostPerToken  float64 `json:"cache_read_input_token_cost"`
-	}
-
-	type pricingEntry struct {
-		InputCostPerToken      float64 `json:"input_cost_per_token"`
-		OutputCostPerToken     float64 `json:"output_cost_per_token"`
-		CacheWriteCostPerToken float64 `json:"cache_creation_input_token_cost"`
-		CacheReadCostPerToken  float64 `json:"cache_read_input_token_cost"`
-	}
-
-	filtered := make(map[string]pricingEntry)
-	for name, rawVal := range raw {
-		var e entry
-		if err := json.Unmarshal(rawVal, &e); err != nil {
-			continue
-		}
-		if e.Provider != "anthropic" {
-			continue
-		}
-		filtered[name] = pricingEntry{
-			InputCostPerToken:      e.InputCostPerToken,
-			OutputCostPerToken:     e.OutputCostPerToken,
-			CacheWriteCostPerToken: e.CacheWriteCostPerToken,
-			CacheReadCostPerToken:  e.CacheReadCostPerToken,
-		}
-	}
-
-	out, err := json.MarshalIndent(filtered, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling filtered pricing: %w", err)
-	}
-
-	outPath := filepath.Join(configDir, "pricing.json")
-	if err := os.WriteFile(outPath, out, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", outPath, err)
-	}
-
-	fmt.Fprintf(os.Stderr, "saved %d model prices to %s\n", len(filtered), outPath)
-	return nil
 }

@@ -3,7 +3,7 @@ COMMIT     = $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE = $(shell date -u +%Y-%m-%d)
 LDFLAGS    = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-.PHONY: build test clean update-pricing
+.PHONY: build test clean
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o hmt .
@@ -13,6 +13,3 @@ test:
 
 clean:
 	rm -f hmt
-
-update-pricing: build
-	./hmt update-pricing
