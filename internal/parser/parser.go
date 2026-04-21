@@ -1,7 +1,11 @@
 package parser
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -34,6 +38,131 @@ type jsonLine struct {
 			CacheReadTokens  int64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
+}
+
+// Dedup removes streaming duplicates. Records sharing the same RequestID
+// are collapsed to the one with the highest OutputTokens.
+// Records with an empty RequestID are kept as-is.
+func Dedup(records []Record) []Record {
+	type best struct {
+		index  int
+		output int64
+	}
+	seen := make(map[string]best)
+	var order []string
+
+	var noID []Record
+	for i, r := range records {
+		if r.RequestID == "" {
+			noID = append(noID, r)
+			continue
+		}
+		if prev, ok := seen[r.RequestID]; ok {
+			if r.OutputTokens > prev.output {
+				seen[r.RequestID] = best{index: i, output: r.OutputTokens}
+			}
+		} else {
+			seen[r.RequestID] = best{index: i, output: r.OutputTokens}
+			order = append(order, r.RequestID)
+		}
+	}
+
+	result := make([]Record, 0, len(order)+len(noID))
+	for _, reqID := range order {
+		result = append(result, records[seen[reqID].index])
+	}
+	result = append(result, noID...)
+	return result
+}
+
+// ProjectName derives a short display name from the Claude Code project
+// directory name. E.g. "-Users-angus-basebit-project-nova-nova" -> "nova/nova".
+// For paths with 3+ segments, returns the last two joined with "/".
+// For 1-2 segments, returns just the last segment.
+func ProjectName(dir string) string {
+	parts := splitDirName(dir)
+	switch {
+	case len(parts) >= 3:
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	case len(parts) >= 1:
+		return parts[len(parts)-1]
+	default:
+		return dir
+	}
+}
+
+func splitDirName(dir string) []string {
+	var parts []string
+	current := ""
+	for _, ch := range dir {
+		if ch == '-' {
+			if current != "" {
+				parts = append(parts, current)
+			}
+			current = ""
+		} else {
+			current += string(ch)
+		}
+	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+	return parts
+}
+
+// ScanDir reads all .jsonl files under baseDir/*/,
+// parses assistant lines, deduplicates, and returns records.
+func ScanDir(baseDir string) ([]Record, error) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", baseDir, err)
+	}
+
+	var allRecords []Record
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		projPath := filepath.Join(baseDir, entry.Name())
+		files, err := filepath.Glob(filepath.Join(projPath, "*.jsonl"))
+		if err != nil {
+			continue
+		}
+		for _, fpath := range files {
+			records, err := parseFile(fpath, entry.Name())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+				continue
+			}
+			allRecords = append(allRecords, records...)
+		}
+	}
+
+	return Dedup(allRecords), nil
+}
+
+func parseFile(path string, projDir string) ([]Record, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var records []Record
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	for scanner.Scan() {
+		rec, ok := ParseLine(scanner.Bytes())
+		if !ok {
+			continue
+		}
+		rec.ProjectDir = projDir
+		records = append(records, rec)
+	}
+	if err := scanner.Err(); err != nil {
+		return records, fmt.Errorf("scanning %s: %w", path, err)
+	}
+	return records, nil
 }
 
 // ParseLine parses a single JSONL line. Returns the record and true if it is
