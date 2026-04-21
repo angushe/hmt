@@ -13,8 +13,8 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 
-	"github.com/angus/hmt/internal/parser"
-	"github.com/angus/hmt/internal/pricing"
+	"github.com/angushe/hmt/internal/parser"
+	"github.com/angushe/hmt/internal/pricing"
 )
 
 // GroupBy specifies the aggregation dimension.

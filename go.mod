@@ -1,4 +1,4 @@
-module github.com/angus/hmt
+module github.com/angushe/hmt
 
 go 1.25.0
 

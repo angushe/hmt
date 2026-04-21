@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/angus/hmt/internal/parser"
-	"github.com/angus/hmt/internal/pricing"
-	"github.com/angus/hmt/internal/report"
+	"github.com/angushe/hmt/internal/parser"
+	"github.com/angushe/hmt/internal/pricing"
+	"github.com/angushe/hmt/internal/report"
 )
 
 //go:embed pricing_fallback.json

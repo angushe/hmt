@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/angus/hmt/internal/parser"
-	"github.com/angus/hmt/internal/pricing"
+	"github.com/angushe/hmt/internal/parser"
+	"github.com/angushe/hmt/internal/pricing"
 )
 
 func makeRecords() []parser.Record {
