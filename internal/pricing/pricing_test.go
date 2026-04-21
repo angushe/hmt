@@ -49,43 +49,6 @@ func TestLookup_NotFound(t *testing.T) {
 	}
 }
 
-func TestLoad_CachedOverFallback(t *testing.T) {
-	tmp := t.TempDir()
-	cachedPath := filepath.Join(tmp, "pricing.json")
-	cachedData := `{"claude-opus-4-6":{"input_cost_per_token":9.99e-06,"output_cost_per_token":1e-05,"cache_creation_input_token_cost":1e-06,"cache_read_input_token_cost":1e-07}}`
-	if err := os.WriteFile(cachedPath, []byte(cachedData), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fallbackData := []byte(`{"claude-opus-4-6":{"input_cost_per_token":5e-06,"output_cost_per_token":2.5e-05,"cache_creation_input_token_cost":6.25e-06,"cache_read_input_token_cost":5e-07}}`)
-
-	table, err := Load(cachedPath, fallbackData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, ok := table.Lookup("claude-opus-4-6")
-	if !ok {
-		t.Fatal("expected to find claude-opus-4-6")
-	}
-	if p.InputCostPerToken != 9.99e-06 {
-		t.Errorf("input cost = %v, want 9.99e-06 (from cache)", p.InputCostPerToken)
-	}
-}
-
-func TestLoad_FallbackWhenNoCached(t *testing.T) {
-	fallbackData := []byte(`{"claude-opus-4-6":{"input_cost_per_token":5e-06,"output_cost_per_token":2.5e-05,"cache_creation_input_token_cost":6.25e-06,"cache_read_input_token_cost":5e-07}}`)
-	table, err := Load("/nonexistent/path/pricing.json", fallbackData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, ok := table.Lookup("claude-opus-4-6")
-	if !ok {
-		t.Fatal("expected to find claude-opus-4-6 from fallback")
-	}
-	if p.InputCostPerToken != 5e-06 {
-		t.Errorf("input cost = %v, want 5e-06 (from fallback)", p.InputCostPerToken)
-	}
-}
-
 func TestIsFresh_FreshFile(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "pricing.json")
@@ -170,5 +133,110 @@ func TestFetchAndFilter_HTTPError(t *testing.T) {
 	err := fetchAndFilter(srv.URL, outPath)
 	if err == nil {
 		t.Fatal("expected error on HTTP 500")
+	}
+}
+
+func TestLoad_FreshCache(t *testing.T) {
+	tmp := t.TempDir()
+	cachedPath := filepath.Join(tmp, "pricing.json")
+	cachedData := `{"claude-opus-4-6":{"input_cost_per_token":5e-06,"output_cost_per_token":2.5e-05,"cache_creation_input_token_cost":6.25e-06,"cache_read_input_token_cost":5e-07}}`
+	os.WriteFile(cachedPath, []byte(cachedData), 0o644)
+
+	origURL := litellmURL
+	litellmURL = "http://127.0.0.1:0/should-not-be-called"
+	defer func() { litellmURL = origURL }()
+
+	table, err := Load(cachedPath, 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := table.Lookup("claude-opus-4-6")
+	if !ok {
+		t.Fatal("expected to find claude-opus-4-6")
+	}
+	if p.InputCostPerToken != 5e-06 {
+		t.Errorf("input cost = %v, want 5e-06", p.InputCostPerToken)
+	}
+}
+
+func TestLoad_ExpiredCache_FetchSucceeds(t *testing.T) {
+	payload := map[string]any{
+		"claude-opus-4-6": map[string]any{
+			"litellm_provider":                "anthropic",
+			"input_cost_per_token":            9.99e-06,
+			"output_cost_per_token":           1e-05,
+			"cache_creation_input_token_cost": 1e-06,
+			"cache_read_input_token_cost":     1e-07,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cachedPath := filepath.Join(tmp, "pricing.json")
+	os.WriteFile(cachedPath, []byte(`{"old":{}}`), 0o644)
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(cachedPath, old, old)
+
+	origURL := litellmURL
+	litellmURL = srv.URL
+	defer func() { litellmURL = origURL }()
+
+	table, err := Load(cachedPath, 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := table.Lookup("claude-opus-4-6")
+	if !ok {
+		t.Fatal("expected claude-opus-4-6 from fresh fetch")
+	}
+	if p.InputCostPerToken != 9.99e-06 {
+		t.Errorf("input cost = %v, want 9.99e-06", p.InputCostPerToken)
+	}
+}
+
+func TestLoad_ExpiredCache_FetchFails_UsesStale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cachedPath := filepath.Join(tmp, "pricing.json")
+	staleData := `{"claude-opus-4-6":{"input_cost_per_token":5e-06,"output_cost_per_token":2.5e-05,"cache_creation_input_token_cost":6.25e-06,"cache_read_input_token_cost":5e-07}}`
+	os.WriteFile(cachedPath, []byte(staleData), 0o644)
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(cachedPath, old, old)
+
+	origURL := litellmURL
+	litellmURL = srv.URL
+	defer func() { litellmURL = origURL }()
+
+	table, err := Load(cachedPath, 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok := table.Lookup("claude-opus-4-6")
+	if !ok {
+		t.Fatal("expected stale cache to still work")
+	}
+}
+
+func TestLoad_NoCache_FetchFails_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	origURL := litellmURL
+	litellmURL = srv.URL
+	defer func() { litellmURL = origURL }()
+
+	_, err := Load("/nonexistent/pricing.json", 1*time.Hour)
+	if err == nil {
+		t.Fatal("expected error when no cache and fetch fails")
 	}
 }

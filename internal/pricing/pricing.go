@@ -56,16 +56,40 @@ func LoadFromJSON(data []byte) (*Table, error) {
 	return t, nil
 }
 
-// Load tries the cached pricing file first, falls back to embedded data.
-func Load(cachedPath string, fallbackData []byte) (*Table, error) {
-	if data, err := os.ReadFile(cachedPath); err == nil {
-		table, err := LoadFromJSON(data)
-		if err == nil {
-			return table, nil
+// litellmURL is the upstream pricing source. It's a var so tests can override it.
+var litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+
+// Load returns a pricing table from the cached file at cachedPath.
+// If the file is missing or older than maxAge, it fetches fresh data from LiteLLM.
+// On fetch failure with an existing stale cache, it warns to stderr and uses the stale data.
+// On fetch failure with no cache, it returns an error.
+func Load(cachedPath string, maxAge time.Duration) (*Table, error) {
+	if isFresh(cachedPath, maxAge) {
+		data, err := os.ReadFile(cachedPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading cached pricing: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "warning: cached pricing invalid, using fallback: %v\n", err)
+		return LoadFromJSON(data)
 	}
-	return LoadFromJSON(fallbackData)
+
+	if err := fetchAndFilter(litellmURL, cachedPath); err != nil {
+		// Fetch failed — try stale cache
+		if data, readErr := os.ReadFile(cachedPath); readErr == nil {
+			ageStr := "unknown"
+			if info, statErr := os.Stat(cachedPath); statErr == nil {
+				ageStr = fmt.Sprintf("%d", int(time.Since(info.ModTime()).Hours()/24))
+			}
+			fmt.Fprintf(os.Stderr, "warning: fetch failed, using stale pricing (aged %s days): %v\n", ageStr, err)
+			return LoadFromJSON(data)
+		}
+		return nil, fmt.Errorf("fetching pricing: %w (no cached data available)", err)
+	}
+
+	data, err := os.ReadFile(cachedPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading freshly cached pricing: %w", err)
+	}
+	return LoadFromJSON(data)
 }
 
 // isFresh returns true if the file at path exists and was modified less than maxAge ago.

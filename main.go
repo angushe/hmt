@@ -122,7 +122,7 @@ func run() error {
 	}
 
 	cachedPricing := filepath.Join(home, ".config", "hmt", "pricing.json")
-	table, err := pricing.Load(cachedPricing, fallbackPricing)
+	table, err := pricing.Load(cachedPricing, 24*time.Hour)
 	if err != nil {
 		return fmt.Errorf("loading pricing: %w", err)
 	}
