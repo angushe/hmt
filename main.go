@@ -37,15 +37,20 @@ func run() error {
 	by := flag.String("by", "day", "aggregation: day, week, month, session, project")
 	since := flag.String("since", "", "start date YYYY-MM-DD")
 	until := flag.String("until", "", "end date YYYY-MM-DD")
-	last := flag.String("last", "", "recent period: 7d, 30d, 3m")
+	last := flag.String("last", "", "recent period: 7d, 30d, 3m (default 1m if no time filter set)")
 	model := flag.String("model", "", "filter by model name")
 	project := flag.String("project", "", "filter by project (fuzzy match)")
-	format := flag.String("format", "table", "output: table, json, csv")
+	format := flag.String("format", "table", "output: table, json, csv, chart")
 	tz := flag.String("timezone", "", "timezone for date grouping (e.g., Asia/Shanghai, UTC)")
+	height := flag.Int("height", 16, "chart plot height in rows (chart format only)")
+	topN := flag.Int("top", 6, "max distinct model stacks in chart (chart format only)")
 	flag.Parse()
 
 	if *last != "" && (*since != "" || *until != "") {
 		return fmt.Errorf("--last and --since/--until are mutually exclusive")
+	}
+	if *last == "" && *since == "" && *until == "" {
+		*last = "1m"
 	}
 
 	var sinceTime, untilTime *time.Time
@@ -139,8 +144,12 @@ func run() error {
 		report.FormatJSON(os.Stdout, rows, *by)
 	case "csv":
 		report.FormatCSV(os.Stdout, rows, *by)
+	case "chart":
+		if err := report.FormatChart(os.Stdout, rows, *by, *height, *topN); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("invalid --format value %q: use table, json, or csv", *format)
+		return fmt.Errorf("invalid --format value %q: use table, json, csv, or chart", *format)
 	}
 
 	return nil
