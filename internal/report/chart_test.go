@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -380,5 +381,91 @@ func TestXAxisLabels_NarrowStride(t *testing.T) {
 	}
 	if visible < 7 || visible > 10 {
 		t.Errorf("visible labels = %d, want ~8", visible)
+	}
+}
+
+func TestRender_StructuralBasics(t *testing.T) {
+	buckets := []bucket{
+		{
+			key:      "2026-04-25",
+			total:    100,
+			segments: []segment{{model: "alpha", color: 0, cost: 60}, {model: "beta", color: 1, cost: 40}},
+		},
+		{
+			key:      "2026-04-26",
+			total:    50,
+			segments: []segment{{model: "alpha", color: 0, cost: 50}},
+		},
+	}
+	var buf bytes.Buffer
+	err := render(&buf, buckets, 8, 60, "day", false)
+	if err != nil {
+		t.Fatalf("render returned error: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Cost") {
+		t.Errorf("missing title with 'Cost':\n%s", out)
+	}
+	if !strings.Contains(out, "$150") {
+		t.Errorf("missing total $150 in title:\n%s", out)
+	}
+	if !strings.Contains(out, "$0") {
+		t.Errorf("missing $0 y-axis label:\n%s", out)
+	}
+	if !strings.Contains(out, "│") {
+		t.Errorf("missing │ divider:\n%s", out)
+	}
+	if !strings.Contains(out, "25") || !strings.Contains(out, "26") {
+		t.Errorf("missing day labels in:\n%s", out)
+	}
+	if !strings.Contains(out, "█") {
+		t.Errorf("missing block character █:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("no ANSI escape — colors not applied:\n%q", out)
+	}
+	if !strings.Contains(out, "alpha") {
+		t.Errorf("missing legend entry 'alpha':\n%s", out)
+	}
+}
+
+func TestRender_TokenMode(t *testing.T) {
+	buckets := []bucket{
+		{
+			key:      "2026-04-25",
+			total:    1_500_000,
+			segments: []segment{{model: "alpha", color: 0, cost: 1_500_000}},
+		},
+	}
+	var buf bytes.Buffer
+	err := render(&buf, buckets, 8, 60, "day", true)
+	if err != nil {
+		t.Fatalf("render returned error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Tokens") {
+		t.Errorf("token mode should mention 'Tokens' in title:\n%s", out)
+	}
+	if strings.Contains(out, "$") {
+		t.Errorf("token mode should not have $ in y-axis:\n%s", out)
+	}
+}
+
+func TestRender_OtherSegmentInLegend(t *testing.T) {
+	buckets := []bucket{
+		{
+			key:      "2026-04-25",
+			total:    100,
+			segments: []segment{{model: "alpha", color: 0, cost: 70}, {model: "other", color: -1, cost: 30}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := render(&buf, buckets, 8, 60, "day", false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "other") {
+		t.Errorf("legend should mention 'other':\n%s", out)
 	}
 }

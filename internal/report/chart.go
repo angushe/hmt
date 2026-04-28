@@ -2,9 +2,12 @@ package report
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/jedib0t/go-pretty/v6/text"
 )
 
 // metricFn extracts a numeric value from a Row. Used for both color ranking
@@ -236,6 +239,219 @@ func truncateWithEllipsis(s string, max int) string {
 		return ""
 	}
 	return string(r[:max-1]) + "…"
+}
+
+// chartPalette maps color index 0..5 to ANSI color sequences.
+var chartPalette = []text.Colors{
+	{text.FgHiCyan},
+	{text.FgHiMagenta},
+	{text.FgHiYellow},
+	{text.FgHiGreen},
+	{text.FgHiBlue},
+	{text.FgHiRed},
+}
+
+var chartOtherColor = text.Colors{text.FgHiBlack}
+
+const chartBarRune = "█"
+const chartLegendRune = "■"
+const chartGutterWidth = 6 // right-aligned y-axis labels
+
+// render draws the chart to w. Caller is responsible for ensuring color is
+// usable (FormatChart handles TTY/NO_COLOR detection upstream). Returns the
+// first write error encountered, if any.
+func render(w io.Writer, buckets []bucket, height, width int, keyName string, useTokens bool) error {
+	if len(buckets) == 0 || height < 1 || width < 1 {
+		return nil
+	}
+
+	plotWidth := width - chartGutterWidth - 3 // gutter + " │ "
+	if plotWidth < 1 {
+		plotWidth = 1
+	}
+
+	// Compute bar width: each bar consumes barW + 1 (1-char gap).
+	barW := (plotWidth + 1) / len(buckets)
+	barW--
+	if barW < 1 {
+		barW = 1
+	}
+	if barW > 4 {
+		barW = 4
+	}
+
+	var maxTotal float64
+	var grandTotal float64
+	for _, b := range buckets {
+		grandTotal += b.total
+		if b.total > maxTotal {
+			maxTotal = b.total
+		}
+	}
+	if maxTotal <= 0 {
+		return nil
+	}
+
+	// Build per-bucket per-row color grid. -2 = empty, -1 = other, 0..5 = palette.
+	const empty = -2
+	grid := make([][]int, len(buckets))
+	for bi, b := range buckets {
+		grid[bi] = make([]int, height)
+		for r := range grid[bi] {
+			grid[bi][r] = empty
+		}
+		bucketHeight := int(math.Round(b.total / maxTotal * float64(height)))
+		if bucketHeight > height {
+			bucketHeight = height
+		}
+		costs := make([]float64, len(b.segments))
+		for i, s := range b.segments {
+			costs[i] = s.cost
+		}
+		segH := splitSegments(costs, bucketHeight)
+		row := 0
+		for i, h := range segH {
+			for j := 0; j < h && row < height; j++ {
+				grid[bi][row] = b.segments[i].color
+				row++
+			}
+		}
+	}
+
+	// Title.
+	var title, totalStr string
+	if useTokens {
+		title = fmt.Sprintf("Tokens by %s", keyName)
+		totalStr = formatTokenShort(grandTotal)
+	} else {
+		title = fmt.Sprintf("Cost by %s (USD)", keyName)
+		totalStr = formatCost(grandTotal)
+	}
+	totalSuffix := fmt.Sprintf("Total: %s", totalStr)
+	titlePad := width - len(title) - len(totalSuffix)
+	if titlePad < 2 {
+		titlePad = 2
+	}
+	if _, err := fmt.Fprintf(w, "%s%s%s\n\n", title, strings.Repeat(" ", titlePad), totalSuffix); err != nil {
+		return err
+	}
+
+	// Plot rows (top → bottom).
+	yLabels := yAxisLabels(maxTotal, height, useTokens)
+	for r := height - 1; r >= 0; r-- {
+		label := yLabels[r]
+		gutter := fmt.Sprintf("%*s", chartGutterWidth, label)
+		var sb strings.Builder
+		sb.WriteString(gutter)
+		sb.WriteString(" │ ")
+		for bi := range buckets {
+			c := grid[bi][r]
+			if c == empty {
+				sb.WriteString(strings.Repeat(" ", barW))
+			} else {
+				bar := strings.Repeat(chartBarRune, barW)
+				if c == -1 {
+					sb.WriteString(chartOtherColor.Sprint(bar))
+				} else {
+					sb.WriteString(chartPalette[c].Sprint(bar))
+				}
+			}
+			if bi < len(buckets)-1 {
+				sb.WriteString(" ")
+			}
+		}
+		sb.WriteString("\n")
+		if _, err := io.WriteString(w, sb.String()); err != nil {
+			return err
+		}
+	}
+
+	// Floor.
+	floorRule := strings.Repeat("─", (barW+1)*len(buckets))
+	if _, err := fmt.Fprintf(w, "%s └%s\n", strings.Repeat(" ", chartGutterWidth), floorRule); err != nil {
+		return err
+	}
+
+	// X-axis labels.
+	xLabels := xAxisLabels(buckets, keyName, barW)
+	var xRow strings.Builder
+	xRow.WriteString(strings.Repeat(" ", chartGutterWidth+3)) // gutter + " │ "
+	for bi, lbl := range xLabels {
+		field := barW + 1
+		if bi == len(xLabels)-1 {
+			field = barW
+		}
+		if len([]rune(lbl)) > field {
+			lbl = truncateWithEllipsis(lbl, field)
+		}
+		left := (field - len([]rune(lbl))) / 2
+		right := field - len([]rune(lbl)) - left
+		if left < 0 {
+			left = 0
+		}
+		if right < 0 {
+			right = 0
+		}
+		xRow.WriteString(strings.Repeat(" ", left))
+		xRow.WriteString(lbl)
+		xRow.WriteString(strings.Repeat(" ", right))
+	}
+	xRow.WriteString("\n")
+	if _, err := io.WriteString(w, xRow.String()); err != nil {
+		return err
+	}
+
+	// Legend.
+	type legendEntry struct {
+		color int
+		model string
+	}
+	seen := make(map[string]bool)
+	var legend []legendEntry
+	for _, b := range buckets {
+		for _, s := range b.segments {
+			k := fmt.Sprintf("%d|%s", s.color, s.model)
+			if !seen[k] {
+				seen[k] = true
+				legend = append(legend, legendEntry{color: s.color, model: s.model})
+			}
+		}
+	}
+	sort.SliceStable(legend, func(i, j int) bool {
+		ai, aj := legend[i].color, legend[j].color
+		if ai == -1 && aj != -1 {
+			return false
+		}
+		if aj == -1 && ai != -1 {
+			return true
+		}
+		return ai < aj
+	})
+
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	var leg strings.Builder
+	leg.WriteString(strings.Repeat(" ", chartGutterWidth+3))
+	for i, e := range legend {
+		var swatch string
+		if e.color == -1 {
+			swatch = chartOtherColor.Sprint(chartLegendRune)
+		} else {
+			swatch = chartPalette[e.color].Sprint(chartLegendRune)
+		}
+		if i > 0 {
+			leg.WriteString("  ")
+		}
+		leg.WriteString(swatch)
+		leg.WriteString(" ")
+		leg.WriteString(e.model)
+	}
+	leg.WriteString("\n")
+	if _, err := io.WriteString(w, leg.String()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // splitSegments allocates totalRows among segments using Hamilton's
