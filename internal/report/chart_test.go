@@ -1,7 +1,10 @@
 package report
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestAssignColors_AllFit(t *testing.T) {
@@ -258,5 +261,124 @@ func TestSplitSegments(t *testing.T) {
 				t.Errorf("sum %d exceeds totalRows %d", sum, tt.totalRows)
 			}
 		})
+	}
+}
+
+func TestYAxisLabels(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxCost     float64
+		height      int
+		mustContain []string
+	}{
+		{
+			name:        "small cost",
+			maxCost:     100,
+			height:      8,
+			mustContain: []string{"$0", "$100"},
+		},
+		{
+			name:        "thousands shorthand",
+			maxCost:     5000,
+			height:      8,
+			mustContain: []string{"$0", "$5.0k"},
+		},
+		{
+			name:        "fractional",
+			maxCost:     2.5,
+			height:      8,
+			mustContain: []string{"$0", "$2.50"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := yAxisLabels(tt.maxCost, tt.height, false)
+			if len(labels) != tt.height {
+				t.Fatalf("len = %d, want %d", len(labels), tt.height)
+			}
+			joined := strings.Join(labels, "\n")
+			for _, s := range tt.mustContain {
+				if !strings.Contains(joined, s) {
+					t.Errorf("missing %q in:\n%s", s, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestYAxisLabels_Tokens(t *testing.T) {
+	labels := yAxisLabels(2_000_000, 8, true)
+	joined := strings.Join(labels, "\n")
+	if !strings.Contains(joined, "2.0M") {
+		t.Errorf("expected 2.0M token shorthand in:\n%s", joined)
+	}
+	if strings.Contains(joined, "$") {
+		t.Errorf("token mode should not have $ prefix:\n%s", joined)
+	}
+}
+
+func TestXAxisLabels_Day(t *testing.T) {
+	bs := []bucket{
+		{key: "2026-04-25"},
+		{key: "2026-04-26"},
+		{key: "2026-04-27"},
+	}
+	labels := xAxisLabels(bs, "day", 2)
+	if len(labels) != 3 {
+		t.Fatalf("len = %d, want 3", len(labels))
+	}
+	if labels[0] != "25" {
+		t.Errorf("[0] = %q, want 25", labels[0])
+	}
+	if labels[2] != "27" {
+		t.Errorf("[2] = %q, want 27", labels[2])
+	}
+}
+
+func TestXAxisLabels_Week(t *testing.T) {
+	bs := []bucket{{key: "2026-W14"}, {key: "2026-W15"}}
+	labels := xAxisLabels(bs, "week", 3)
+	if labels[0] != "W14" {
+		t.Errorf("[0] = %q, want W14", labels[0])
+	}
+}
+
+func TestXAxisLabels_Month(t *testing.T) {
+	bs := []bucket{{key: "2026-04"}, {key: "2026-05"}}
+	labels := xAxisLabels(bs, "month", 3)
+	if labels[0] != "Apr" {
+		t.Errorf("[0] = %q, want Apr", labels[0])
+	}
+	if labels[1] != "May" {
+		t.Errorf("[1] = %q, want May", labels[1])
+	}
+}
+
+func TestXAxisLabels_TruncateLongKey(t *testing.T) {
+	bs := []bucket{{key: "very-long-project-name"}}
+	labels := xAxisLabels(bs, "project", 4)
+	// barW=4 → label fits in barW+1=5 runes
+	if utf8.RuneCountInString(labels[0]) > 5 {
+		t.Errorf("label %q exceeds 5 runes (barW=4)", labels[0])
+	}
+	if !strings.Contains(labels[0], "…") {
+		t.Errorf("label %q should contain ellipsis when truncated", labels[0])
+	}
+}
+
+func TestXAxisLabels_NarrowStride(t *testing.T) {
+	var bs []bucket
+	for d := 1; d <= 16; d++ {
+		bs = append(bs, bucket{key: fmt.Sprintf("2026-04-%02d", d)})
+	}
+	labels := xAxisLabels(bs, "day", 1)
+	visible := 0
+	for _, l := range labels {
+		if strings.TrimSpace(l) != "" {
+			visible++
+		}
+	}
+	if visible < 7 || visible > 10 {
+		t.Errorf("visible labels = %d, want ~8", visible)
 	}
 }

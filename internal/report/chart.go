@@ -1,8 +1,10 @@
 package report
 
 import (
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // metricFn extracts a numeric value from a Row. Used for both color ranking
@@ -120,6 +122,120 @@ func bucketize(rows []Row, colors map[string]int, keyName string, metric metricF
 		result = append(result, grouped[k].b)
 	}
 	return result
+}
+
+// yAxisLabels returns one label per plot row, indexed 0 (bottom) to height-1 (top).
+// Empty strings indicate "no label at this row" (we only label every ~4 rows).
+// useTokens=true switches to bare token shorthand instead of "$" prefixed cost.
+func yAxisLabels(maxValue float64, height int, useTokens bool) []string {
+	labels := make([]string, height)
+	if height == 0 {
+		return labels
+	}
+	stride := height / 4
+	if stride < 1 {
+		stride = 1
+	}
+	for r := 0; r < height; r++ {
+		if r == 0 || r == height-1 || r%stride == 0 {
+			val := float64(r) * maxValue / float64(height-1)
+			if useTokens {
+				labels[r] = formatTokenShort(val)
+			} else {
+				labels[r] = formatCost(val)
+			}
+		}
+	}
+	return labels
+}
+
+func formatCost(v float64) string {
+	if v >= 1000 {
+		return fmt.Sprintf("$%.1fk", v/1000)
+	}
+	if v == math.Trunc(v) {
+		return fmt.Sprintf("$%d", int64(v))
+	}
+	return fmt.Sprintf("$%.2f", v)
+}
+
+func formatTokenShort(v float64) string {
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%.1fM", v/1_000_000)
+	case v >= 1_000:
+		return fmt.Sprintf("%.1fk", v/1_000)
+	default:
+		return fmt.Sprintf("%d", int64(v))
+	}
+}
+
+// xAxisLabels returns one label per bucket, formatted according to keyName.
+// When barW=1, labels are emitted at a stride targeting ~8 visible labels;
+// other positions get blank strings to preserve alignment.
+func xAxisLabels(buckets []bucket, keyName string, barW int) []string {
+	labels := make([]string, len(buckets))
+	for i, b := range buckets {
+		labels[i] = formatXLabel(b.key, keyName)
+	}
+	if barW >= 2 {
+		maxLen := barW + 1
+		for i, l := range labels {
+			if len([]rune(l)) > maxLen {
+				labels[i] = truncateWithEllipsis(l, maxLen)
+			}
+		}
+	} else {
+		stride := (len(buckets) + 7) / 8 // ceil(N/8)
+		if stride < 1 {
+			stride = 1
+		}
+		for i := range labels {
+			if i%stride != 0 {
+				labels[i] = ""
+			}
+		}
+	}
+	return labels
+}
+
+func formatXLabel(key, keyName string) string {
+	switch keyName {
+	case "day":
+		if len(key) >= 10 {
+			return key[8:10]
+		}
+		return key
+	case "week":
+		idx := strings.Index(key, "W")
+		if idx >= 0 {
+			return key[idx:]
+		}
+		return key
+	case "month":
+		months := []string{"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+		if len(key) == 7 {
+			n := 0
+			fmt.Sscanf(key[5:], "%d", &n)
+			if n >= 1 && n <= 12 {
+				return months[n]
+			}
+		}
+		return key
+	default:
+		return key
+	}
+}
+
+func truncateWithEllipsis(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max < 1 {
+		return ""
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // splitSegments allocates totalRows among segments using Hamilton's
