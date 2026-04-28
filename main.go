@@ -37,7 +37,7 @@ func run() error {
 	by := flag.String("by", "day", "aggregation: day, week, month, session, project")
 	since := flag.String("since", "", "start date YYYY-MM-DD")
 	until := flag.String("until", "", "end date YYYY-MM-DD")
-	last := flag.String("last", "", "recent period: 7d, 30d, 3m")
+	last := flag.String("last", "", "recent period: 7d, 30d, 3m (default 1m if no time filter set)")
 	model := flag.String("model", "", "filter by model name")
 	project := flag.String("project", "", "filter by project (fuzzy match)")
 	format := flag.String("format", "table", "output: table, json, csv, chart")
@@ -48,6 +48,9 @@ func run() error {
 
 	if *last != "" && (*since != "" || *until != "") {
 		return fmt.Errorf("--last and --since/--until are mutually exclusive")
+	}
+	if *last == "" && *since == "" && *until == "" {
+		*last = "1m"
 	}
 
 	var sinceTime, untilTime *time.Time

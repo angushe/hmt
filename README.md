@@ -23,7 +23,7 @@ hmt [flags]
 | `--by` | `day` | Aggregation: `day`, `week`, `month`, `session`, `project` |
 | `--since` | | Start date (inclusive), `YYYY-MM-DD` |
 | `--until` | | End date (inclusive), `YYYY-MM-DD` |
-| `--last` | | Recent period: `7d`, `30d`, `3m`. Mutually exclusive with `--since`/`--until` |
+| `--last` | `1m` | Recent period: `7d`, `30d`, `3m`. Default applies only when neither `--since` nor `--until` is set. Mutually exclusive with them otherwise |
 | `--model` | | Filter by model name |
 | `--project` | | Filter by project directory (substring match) |
 | `--format` | `table` | Output: `table`, `json`, `csv`, `chart` |
