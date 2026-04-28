@@ -255,17 +255,20 @@ var chartOtherColor = text.Colors{text.FgHiBlack}
 
 const chartBarRune = "█"
 const chartLegendRune = "■"
-const chartGutterWidth = 6 // right-aligned y-axis labels
+const chartGutterWidth = 6                        // right-aligned y-axis labels
+const chartLeftOffset = chartGutterWidth + 3      // gutter + " │ "
 
 // render draws the chart to w. Caller is responsible for ensuring color is
-// usable (FormatChart handles TTY/NO_COLOR detection upstream). Returns the
-// first write error encountered, if any.
+// usable (FormatChart handles TTY/NO_COLOR detection upstream) and for
+// truncating buckets to fit width (FormatChart enforces
+// len(buckets) <= (width-chartGutterWidth-3)/2 — Task 7). Returns the first
+// write error encountered, if any.
 func render(w io.Writer, buckets []bucket, height, width int, keyName string, useTokens bool) error {
 	if len(buckets) == 0 || height < 1 || width < 1 {
 		return nil
 	}
 
-	plotWidth := width - chartGutterWidth - 3 // gutter + " │ "
+	plotWidth := width - chartLeftOffset
 	if plotWidth < 1 {
 		plotWidth = 1
 	}
@@ -375,7 +378,7 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 	// X-axis labels.
 	xLabels := xAxisLabels(buckets, keyName, barW)
 	var xRow strings.Builder
-	xRow.WriteString(strings.Repeat(" ", chartGutterWidth+3)) // gutter + " │ "
+	xRow.WriteString(strings.Repeat(" ", chartLeftOffset))
 	for bi, lbl := range xLabels {
 		field := barW + 1
 		if bi == len(xLabels)-1 {
@@ -432,7 +435,7 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		return err
 	}
 	var leg strings.Builder
-	leg.WriteString(strings.Repeat(" ", chartGutterWidth+3))
+	leg.WriteString(strings.Repeat(" ", chartLeftOffset))
 	for i, e := range legend {
 		var swatch string
 		if e.color == -1 {
