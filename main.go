@@ -40,8 +40,10 @@ func run() error {
 	last := flag.String("last", "", "recent period: 7d, 30d, 3m")
 	model := flag.String("model", "", "filter by model name")
 	project := flag.String("project", "", "filter by project (fuzzy match)")
-	format := flag.String("format", "table", "output: table, json, csv")
+	format := flag.String("format", "table", "output: table, json, csv, chart")
 	tz := flag.String("timezone", "", "timezone for date grouping (e.g., Asia/Shanghai, UTC)")
+	height := flag.Int("height", 16, "chart plot height in rows (chart format only)")
+	topN := flag.Int("top", 6, "max distinct model stacks in chart (chart format only)")
 	flag.Parse()
 
 	if *last != "" && (*since != "" || *until != "") {
@@ -139,8 +141,12 @@ func run() error {
 		report.FormatJSON(os.Stdout, rows, *by)
 	case "csv":
 		report.FormatCSV(os.Stdout, rows, *by)
+	case "chart":
+		if err := report.FormatChart(os.Stdout, rows, *by, *height, *topN); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("invalid --format value %q: use table, json, or csv", *format)
+		return fmt.Errorf("invalid --format value %q: use table, json, csv, or chart", *format)
 	}
 
 	return nil
