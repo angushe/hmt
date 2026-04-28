@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -563,5 +564,72 @@ func TestFormatChart_EmptyRows(t *testing.T) {
 	err := FormatChart(&buf, nil, "day", 8, 6)
 	if err != nil {
 		t.Errorf("expected nil for empty rows; got %v", err)
+	}
+}
+
+// TestRender_GutterAlignsWithWideLabels verifies that the y-axis │ divider
+// appears at the same column on every row, even when some labels are wider
+// than the default gutter (e.g., "$216.89" is 7 chars vs the default 6).
+func TestRender_GutterAlignsWithWideLabels(t *testing.T) {
+	buckets := []bucket{
+		{key: "2026-04-25", total: 216.89, segments: []segment{{model: "alpha", color: 0, cost: 216.89}}},
+		{key: "2026-04-26", total: 100.00, segments: []segment{{model: "alpha", color: 0, cost: 100.00}}},
+	}
+	var buf bytes.Buffer
+	if err := render(&buf, buckets, 16, 80, "day", false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := buf.String()
+
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	var dividerCols []int
+	for _, line := range strings.Split(out, "\n") {
+		plain := ansi.ReplaceAllString(line, "")
+		idx := strings.Index(plain, "│")
+		if idx < 0 {
+			continue
+		}
+		col := utf8.RuneCountInString(plain[:idx])
+		dividerCols = append(dividerCols, col)
+	}
+	if len(dividerCols) < 2 {
+		t.Fatalf("expected multiple │ rows; got %d. Output:\n%s", len(dividerCols), out)
+	}
+	for i, c := range dividerCols[1:] {
+		if c != dividerCols[0] {
+			t.Errorf("│ misaligned: row 0 at col %d, row %d at col %d.\nOutput:\n%s",
+				dividerCols[0], i+1, c, out)
+		}
+	}
+}
+
+// TestRender_FloorAlignsWithBars verifies that the └ corner of the floor line
+// sits exactly under the │ divider above (i.e., same column).
+func TestRender_FloorAlignsWithBars(t *testing.T) {
+	buckets := []bucket{
+		{key: "2026-04-25", total: 216.89, segments: []segment{{model: "alpha", color: 0, cost: 216.89}}},
+	}
+	var buf bytes.Buffer
+	if err := render(&buf, buckets, 16, 80, "day", false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	var dividerCol, cornerCol int = -1, -1
+	for _, line := range strings.Split(buf.String(), "\n") {
+		plain := ansi.ReplaceAllString(line, "")
+		if dividerCol == -1 {
+			if i := strings.Index(plain, "│"); i >= 0 {
+				dividerCol = utf8.RuneCountInString(plain[:i])
+			}
+		}
+		if i := strings.Index(plain, "└"); i >= 0 {
+			cornerCol = utf8.RuneCountInString(plain[:i])
+		}
+	}
+	if dividerCol == -1 || cornerCol == -1 {
+		t.Fatalf("missing │ or └ in output:\n%s", buf.String())
+	}
+	if cornerCol != dividerCol {
+		t.Errorf("│ at col %d but └ at col %d (should match)", dividerCol, cornerCol)
 	}
 }

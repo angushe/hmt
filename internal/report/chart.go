@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jedib0t/go-pretty/v6/text"
 	"golang.org/x/term"
@@ -257,8 +258,21 @@ var chartOtherColor = text.Colors{text.FgHiBlack}
 
 const chartBarRune = "█"
 const chartLegendRune = "■"
-const chartGutterWidth = 6                   // right-aligned y-axis labels
-const chartLeftOffset = chartGutterWidth + 3 // gutter + " │ "
+const chartGutterWidth = 6                   // right-aligned y-axis labels (minimum)
+const chartLeftOffset = chartGutterWidth + 3 // gutter + " │ " (minimum)
+
+// chartGutterFor returns the gutter width needed to fit y-axis labels.
+// It's at least chartGutterWidth (the default minimum) and grows to fit
+// the widest label produced by yAxisLabels.
+func chartGutterFor(maxValue float64, height int, useTokens bool) int {
+	w := chartGutterWidth
+	for _, l := range yAxisLabels(maxValue, height, useTokens) {
+		if rw := utf8.RuneCountInString(l); rw > w {
+			w = rw
+		}
+	}
+	return w
+}
 
 // render draws the chart to w. Caller is responsible for ensuring color is
 // usable (FormatChart handles TTY/NO_COLOR detection upstream) and for
@@ -268,21 +282,6 @@ const chartLeftOffset = chartGutterWidth + 3 // gutter + " │ "
 func render(w io.Writer, buckets []bucket, height, width int, keyName string, useTokens bool) error {
 	if len(buckets) == 0 || height < 1 || width < 1 {
 		return nil
-	}
-
-	plotWidth := width - chartLeftOffset
-	if plotWidth < 1 {
-		plotWidth = 1
-	}
-
-	// Compute bar width: each bar consumes barW + 1 (1-char gap).
-	barW := (plotWidth + 1) / len(buckets)
-	barW--
-	if barW < 1 {
-		barW = 1
-	}
-	if barW > 4 {
-		barW = 4
 	}
 
 	var maxTotal float64
@@ -295,6 +294,24 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 	}
 	if maxTotal <= 0 {
 		return nil
+	}
+
+	gutterW := chartGutterFor(maxTotal, height, useTokens)
+	leftOffset := gutterW + 3
+
+	plotWidth := width - leftOffset
+	if plotWidth < 1 {
+		plotWidth = 1
+	}
+
+	// Compute bar width: each bar consumes barW + 1 (1-char gap).
+	barW := (plotWidth + 1) / len(buckets)
+	barW--
+	if barW < 1 {
+		barW = 1
+	}
+	if barW > 4 {
+		barW = 4
 	}
 
 	// Build per-bucket per-row color grid. -2 = empty, -1 = other, 0..5 = palette.
@@ -345,7 +362,7 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 	yLabels := yAxisLabels(maxTotal, height, useTokens)
 	for r := height - 1; r >= 0; r-- {
 		label := yLabels[r]
-		gutter := fmt.Sprintf("%*s", chartGutterWidth, label)
+		gutter := fmt.Sprintf("%*s", gutterW, label)
 		var sb strings.Builder
 		sb.WriteString(gutter)
 		sb.WriteString(" │ ")
@@ -373,14 +390,14 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 
 	// Floor.
 	floorRule := strings.Repeat("─", (barW+1)*len(buckets))
-	if _, err := fmt.Fprintf(w, "%s └%s\n", strings.Repeat(" ", chartGutterWidth), floorRule); err != nil {
+	if _, err := fmt.Fprintf(w, "%s └%s\n", strings.Repeat(" ", gutterW), floorRule); err != nil {
 		return err
 	}
 
 	// X-axis labels.
 	xLabels := xAxisLabels(buckets, keyName, barW)
 	var xRow strings.Builder
-	xRow.WriteString(strings.Repeat(" ", chartLeftOffset))
+	xRow.WriteString(strings.Repeat(" ", leftOffset))
 	for bi, lbl := range xLabels {
 		field := barW + 1
 		if bi == len(xLabels)-1 {
@@ -437,7 +454,7 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		return err
 	}
 	var leg strings.Builder
-	leg.WriteString(strings.Repeat(" ", chartLeftOffset))
+	leg.WriteString(strings.Repeat(" ", leftOffset))
 	for i, e := range legend {
 		var swatch string
 		if e.color == -1 {
@@ -509,7 +526,14 @@ func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) erro
 	colors := assignColors(rows, topN, metric)
 	buckets := bucketize(rows, colors, keyName, metric)
 
-	plotWidth := width - chartLeftOffset
+	var maxTotal float64
+	for _, b := range buckets {
+		if b.total > maxTotal {
+			maxTotal = b.total
+		}
+	}
+	gutterW := chartGutterFor(maxTotal, height, useTokens)
+	plotWidth := width - gutterW - 3
 	maxBuckets := plotWidth / 2
 	if maxBuckets < 1 {
 		maxBuckets = 1
