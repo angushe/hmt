@@ -81,6 +81,104 @@ func TestAssignColors_AggregatesAcrossRows(t *testing.T) {
 	}
 }
 
+func TestBucketize_TimeKeyAscending(t *testing.T) {
+	rows := []Row{
+		{Key: "2026-04-26", Model: "alpha", Cost: 10, HasCost: true},
+		{Key: "2026-04-24", Model: "alpha", Cost: 5, HasCost: true},
+		{Key: "2026-04-25", Model: "alpha", Cost: 7, HasCost: true},
+	}
+	colors := map[string]int{"alpha": 0}
+	buckets := bucketize(rows, colors, "day", costMetric)
+	if len(buckets) != 3 {
+		t.Fatalf("len = %d, want 3", len(buckets))
+	}
+	if buckets[0].key != "2026-04-24" {
+		t.Errorf("buckets[0] = %q, want 2026-04-24", buckets[0].key)
+	}
+	if buckets[2].key != "2026-04-26" {
+		t.Errorf("buckets[2] = %q, want 2026-04-26", buckets[2].key)
+	}
+}
+
+func TestBucketize_NonTimeKeyByCostDesc(t *testing.T) {
+	rows := []Row{
+		{Key: "proj-a", Model: "alpha", Cost: 5, HasCost: true},
+		{Key: "proj-b", Model: "alpha", Cost: 20, HasCost: true},
+		{Key: "proj-c", Model: "alpha", Cost: 10, HasCost: true},
+	}
+	colors := map[string]int{"alpha": 0}
+	buckets := bucketize(rows, colors, "project", costMetric)
+	if buckets[0].key != "proj-b" {
+		t.Errorf("buckets[0] = %q, want proj-b (highest)", buckets[0].key)
+	}
+	if buckets[2].key != "proj-a" {
+		t.Errorf("buckets[2] = %q, want proj-a (lowest)", buckets[2].key)
+	}
+}
+
+func TestBucketize_SegmentsSortedByCostDesc(t *testing.T) {
+	rows := []Row{
+		{Key: "d1", Model: "alpha", Cost: 5, HasCost: true},
+		{Key: "d1", Model: "beta", Cost: 20, HasCost: true},
+		{Key: "d1", Model: "gamma", Cost: 10, HasCost: true},
+	}
+	colors := map[string]int{"alpha": 0, "beta": 1, "gamma": 2}
+	buckets := bucketize(rows, colors, "day", costMetric)
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(buckets))
+	}
+	segs := buckets[0].segments
+	if len(segs) != 3 {
+		t.Fatalf("segments = %d, want 3", len(segs))
+	}
+	if segs[0].model != "beta" {
+		t.Errorf("segs[0] = %q, want beta (highest cost)", segs[0].model)
+	}
+	if segs[2].model != "alpha" {
+		t.Errorf("segs[2] = %q, want alpha (lowest cost)", segs[2].model)
+	}
+}
+
+func TestBucketize_OtherCollapsed(t *testing.T) {
+	rows := []Row{
+		{Key: "d1", Model: "alpha", Cost: 50, HasCost: true},
+		{Key: "d1", Model: "small1", Cost: 3, HasCost: true},
+		{Key: "d1", Model: "small2", Cost: 2, HasCost: true},
+	}
+	colors := map[string]int{"alpha": 0, "small1": -1, "small2": -1}
+	buckets := bucketize(rows, colors, "day", costMetric)
+	if len(buckets[0].segments) != 2 {
+		t.Fatalf("segments = %d, want 2 (alpha + other)", len(buckets[0].segments))
+	}
+	var otherSeg *segment
+	for i := range buckets[0].segments {
+		if buckets[0].segments[i].color == -1 {
+			otherSeg = &buckets[0].segments[i]
+		}
+	}
+	if otherSeg == nil {
+		t.Fatal("no other segment found")
+	}
+	if otherSeg.cost != 5 {
+		t.Errorf("other.cost = %f, want 5", otherSeg.cost)
+	}
+	if otherSeg.model != "other" {
+		t.Errorf("other.model = %q, want \"other\"", otherSeg.model)
+	}
+}
+
+func TestBucketize_BucketTotalCorrect(t *testing.T) {
+	rows := []Row{
+		{Key: "d1", Model: "alpha", Cost: 7, HasCost: true},
+		{Key: "d1", Model: "beta", Cost: 3, HasCost: true},
+	}
+	colors := map[string]int{"alpha": 0, "beta": 1}
+	buckets := bucketize(rows, colors, "day", costMetric)
+	if buckets[0].total != 10 {
+		t.Errorf("total = %f, want 10", buckets[0].total)
+	}
+}
+
 func TestSplitSegments(t *testing.T) {
 	tests := []struct {
 		name      string
