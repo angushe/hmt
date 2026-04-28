@@ -257,8 +257,8 @@ var chartOtherColor = text.Colors{text.FgHiBlack}
 
 const chartBarRune = "█"
 const chartLegendRune = "■"
-const chartGutterWidth = 6                        // right-aligned y-axis labels
-const chartLeftOffset = chartGutterWidth + 3      // gutter + " │ "
+const chartGutterWidth = 6                   // right-aligned y-axis labels
+const chartLeftOffset = chartGutterWidth + 3 // gutter + " │ "
 
 // render draws the chart to w. Caller is responsible for ensuring color is
 // usable (FormatChart handles TTY/NO_COLOR detection upstream) and for
@@ -522,8 +522,15 @@ func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) erro
 		default:
 			buckets = buckets[:maxBuckets]
 		}
-		fmt.Fprintf(os.Stderr, "showing %d of %d buckets; narrow your range with --since/--last\n",
-			maxBuckets, maxBuckets+dropped)
+		hint := "--since/--last"
+		switch keyName {
+		case "project":
+			hint = "--project"
+		case "session":
+			hint = "--project/--model"
+		}
+		fmt.Fprintf(os.Stderr, "showing %d of %d buckets; narrow with %s\n",
+			maxBuckets, maxBuckets+dropped, hint)
 	}
 
 	return render(w, buckets, height, width, keyName, useTokens)
