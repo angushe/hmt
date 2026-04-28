@@ -5,6 +5,52 @@ import (
 	"sort"
 )
 
+// metricFn extracts a numeric value from a Row. Used for both color ranking
+// (assignColors) and segment sizing (bucketize). The two callers always use
+// the same metric, so the result is internally consistent.
+type metricFn func(Row) float64
+
+func costMetric(r Row) float64 { return r.Cost }
+
+func tokenMetric(r Row) float64 {
+	return float64(r.InputTokens + r.OutputTokens + r.CacheWriteTokens + r.CacheReadTokens)
+}
+
+// assignColors ranks models by total metric (descending; alphabetical tiebreak)
+// and assigns color indices 0..topN-1. Models beyond topN map to -1 (rendered
+// as "other" in gray).
+func assignColors(rows []Row, topN int, metric metricFn) map[string]int {
+	totals := make(map[string]float64)
+	for _, r := range rows {
+		totals[r.Model] += metric(r)
+	}
+
+	type modelTotal struct {
+		name string
+		val  float64
+	}
+	list := make([]modelTotal, 0, len(totals))
+	for m, v := range totals {
+		list = append(list, modelTotal{name: m, val: v})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].val != list[j].val {
+			return list[i].val > list[j].val
+		}
+		return list[i].name < list[j].name
+	})
+
+	result := make(map[string]int, len(list))
+	for i, mt := range list {
+		if i < topN {
+			result[mt.name] = i
+		} else {
+			result[mt.name] = -1
+		}
+	}
+	return result
+}
+
 // splitSegments allocates totalRows among segments using Hamilton's
 // largest-remainder method. Segments whose proportional share is below 0.5
 // rows are dropped (returned as 0). The sum of the result is at most totalRows
