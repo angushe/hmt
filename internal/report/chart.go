@@ -258,8 +258,7 @@ var chartOtherColor = text.Colors{text.FgHiBlack}
 
 const chartBarRune = "█"
 const chartLegendRune = "■"
-const chartGutterWidth = 6                   // right-aligned y-axis labels (minimum)
-const chartLeftOffset = chartGutterWidth + 3 // gutter + " │ " (minimum)
+const chartGutterWidth = 6 // right-aligned y-axis labels (minimum; grows via chartGutterFor)
 
 // chartGutterFor returns the gutter width needed to fit y-axis labels.
 // It's at least chartGutterWidth (the default minimum) and grows to fit
