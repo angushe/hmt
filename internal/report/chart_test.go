@@ -469,3 +469,99 @@ func TestRender_OtherSegmentInLegend(t *testing.T) {
 		t.Errorf("legend should mention 'other':\n%s", out)
 	}
 }
+
+func TestFormatChart_FallsBackToTableWhenNoTTY(t *testing.T) {
+	rows := sampleRows()
+	var buf bytes.Buffer
+	err := FormatChart(&buf, rows, "day", 16, 6)
+	if err != nil {
+		t.Fatalf("FormatChart returned error: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "█") {
+		t.Errorf("expected table fallback (no █), got chart:\n%s", out)
+	}
+	if !strings.Contains(out, "claude-opus-4-6") {
+		t.Errorf("table fallback missing model name:\n%s", out)
+	}
+}
+
+func TestFormatChart_ForceColorRenders(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	rows := sampleRows()
+	var buf bytes.Buffer
+	if err := FormatChart(&buf, rows, "day", 8, 6); err != nil {
+		t.Fatalf("FormatChart returned error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "█") {
+		t.Errorf("FORCE_COLOR=1 should render chart (containing █):\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("expected ANSI escape in chart output")
+	}
+}
+
+func TestFormatChart_NoColorEnvFallsBack(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	t.Setenv("NO_COLOR", "1")
+	rows := sampleRows()
+	var buf bytes.Buffer
+	if err := FormatChart(&buf, rows, "day", 8, 6); err != nil {
+		t.Fatalf("FormatChart returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), "█") {
+		t.Errorf("NO_COLOR set should fall back to table; got chart")
+	}
+}
+
+func TestFormatChart_HeightValidation(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	rows := sampleRows()
+	var buf bytes.Buffer
+	err := FormatChart(&buf, rows, "day", 5, 6)
+	if err == nil {
+		t.Error("expected error for height < 6")
+	}
+	if err != nil && !strings.Contains(err.Error(), "height") {
+		t.Errorf("error message should mention height: %v", err)
+	}
+}
+
+func TestFormatChart_TopValidation(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	rows := sampleRows()
+	var buf bytes.Buffer
+	err := FormatChart(&buf, rows, "day", 8, 0)
+	if err == nil {
+		t.Error("expected error for topN < 1")
+	}
+	if err != nil && !strings.Contains(err.Error(), "top") {
+		t.Errorf("error message should mention top: %v", err)
+	}
+}
+
+func TestFormatChart_TokenFallbackWhenNoCost(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	rows := []Row{
+		{Key: "2026-04-25", Model: "alpha", InputTokens: 1000, OutputTokens: 500, HasCost: false},
+		{Key: "2026-04-26", Model: "alpha", InputTokens: 800, OutputTokens: 200, HasCost: false},
+	}
+	var buf bytes.Buffer
+	if err := FormatChart(&buf, rows, "day", 8, 6); err != nil {
+		t.Fatalf("FormatChart returned error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Tokens") {
+		t.Errorf("expected token-mode title (with 'Tokens'); got:\n%s", out)
+	}
+}
+
+func TestFormatChart_EmptyRows(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	var buf bytes.Buffer
+	err := FormatChart(&buf, nil, "day", 8, 6)
+	if err != nil {
+		t.Errorf("expected nil for empty rows; got %v", err)
+	}
+}

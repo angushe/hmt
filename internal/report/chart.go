@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/jedib0t/go-pretty/v6/text"
+	"golang.org/x/term"
 )
 
 // metricFn extracts a numeric value from a Row. Used for both color ranking
@@ -455,6 +457,102 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		return err
 	}
 	return nil
+}
+
+// FormatChart writes a vertical stacked bar chart to w. keyName matches the
+// --by value (used for x-axis labeling). height is the plot height (minimum 6).
+// topN is the maximum number of distinct model stacks (minimum 1).
+//
+// Falls back to FormatTable when:
+//   - w is not a TTY (and FORCE_COLOR is not set)
+//   - NO_COLOR env var is set
+//   - terminal width is too narrow for a chart
+func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) error {
+	if height < 6 {
+		return fmt.Errorf("--height must be at least 6")
+	}
+	if topN < 1 {
+		return fmt.Errorf("--top must be at least 1")
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if !chartColorAllowed(w) {
+		fmt.Fprintln(os.Stderr, "chart requires a color terminal; falling back to table")
+		FormatTable(w, rows, keyName)
+		return nil
+	}
+
+	width := chartTerminalWidth(w)
+	if width < 30 {
+		fmt.Fprintln(os.Stderr, "terminal too narrow for chart; falling back to table")
+		FormatTable(w, rows, keyName)
+		return nil
+	}
+
+	var hasAnyCost bool
+	for _, r := range rows {
+		if r.HasCost {
+			hasAnyCost = true
+			break
+		}
+	}
+	metric := costMetric
+	useTokens := false
+	if !hasAnyCost {
+		fmt.Fprintln(os.Stderr, "no pricing data for any model; charting tokens instead of cost")
+		metric = tokenMetric
+		useTokens = true
+	}
+
+	colors := assignColors(rows, topN, metric)
+	buckets := bucketize(rows, colors, keyName, metric)
+
+	plotWidth := width - chartLeftOffset
+	maxBuckets := plotWidth / 2
+	if maxBuckets < 1 {
+		maxBuckets = 1
+	}
+	if len(buckets) > maxBuckets {
+		dropped := len(buckets) - maxBuckets
+		switch keyName {
+		case "day", "week", "month":
+			buckets = buckets[len(buckets)-maxBuckets:]
+		default:
+			buckets = buckets[:maxBuckets]
+		}
+		fmt.Fprintf(os.Stderr, "showing %d of %d buckets; narrow your range with --since/--last\n",
+			maxBuckets, maxBuckets+dropped)
+	}
+
+	return render(w, buckets, height, width, keyName, useTokens)
+}
+
+// chartColorAllowed reports whether ANSI color output should be emitted.
+// Honors FORCE_COLOR (always on), NO_COLOR (always off), and TTY detection.
+func chartColorAllowed(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("FORCE_COLOR") != "" {
+		return true
+	}
+	if f, ok := w.(*os.File); ok {
+		return term.IsTerminal(int(f.Fd()))
+	}
+	return false
+}
+
+// chartTerminalWidth returns the columns reported by the OS for w if it's a
+// terminal, or 80 otherwise.
+func chartTerminalWidth(w io.Writer) int {
+	if f, ok := w.(*os.File); ok {
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
+			return width
+		}
+	}
+	return 80
 }
 
 // splitSegments allocates totalRows among segments using Hamilton's
