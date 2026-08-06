@@ -38,7 +38,7 @@ type jsonEntry struct {
 }
 
 // LoadFromJSON parses a pricing JSON blob (LiteLLM format, filtered to
-// Anthropic models) into a Table.
+// Anthropic and OpenAI models) into a Table.
 func LoadFromJSON(data []byte) (*Table, error) {
 	var raw map[string]jsonEntry
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -46,6 +46,9 @@ func LoadFromJSON(data []byte) (*Table, error) {
 	}
 	t := &Table{models: make(map[string]ModelPricing, len(raw))}
 	for name, entry := range raw {
+		if name == cacheSchemaKey {
+			continue
+		}
 		t.models[name] = ModelPricing{
 			InputCostPerToken:      entry.InputCostPerToken,
 			OutputCostPerToken:     entry.OutputCostPerToken,
@@ -59,6 +62,8 @@ func LoadFromJSON(data []byte) (*Table, error) {
 // litellmURL is the upstream pricing source. It's a var so tests can override it.
 var litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
+const cacheSchemaKey = "__hmt_cache_schema_v1__"
+
 // Load returns a pricing table from the cached file at cachedPath.
 // If the file is missing or older than maxAge, it fetches fresh data from LiteLLM.
 // On fetch failure with an existing stale cache, it warns to stderr and uses the stale data.
@@ -69,7 +74,9 @@ func Load(cachedPath string, maxAge time.Duration) (*Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading cached pricing: %w", err)
 		}
-		return LoadFromJSON(data)
+		if hasCurrentCacheSchema(data) {
+			return LoadFromJSON(data)
+		}
 	}
 
 	if err := fetchAndFilter(litellmURL, cachedPath); err != nil {
@@ -79,8 +86,18 @@ func Load(cachedPath string, maxAge time.Duration) (*Table, error) {
 			if info, statErr := os.Stat(cachedPath); statErr == nil {
 				ageStr = fmt.Sprintf("%d", int(time.Since(info.ModTime()).Hours()/24))
 			}
-			fmt.Fprintf(os.Stderr, "warning: fetch failed, using stale pricing (aged %s days): %v\n", ageStr, err)
-			return LoadFromJSON(data)
+			cacheDescription := "stale pricing"
+			if !hasCurrentCacheSchema(data) {
+				cacheDescription = "legacy pricing cache without OpenAI model coverage"
+			}
+			fmt.Fprintf(os.Stderr, "warning: fetch failed, using %s (aged %s days): %v\n", cacheDescription, ageStr, err)
+			table, parseErr := LoadFromJSON(data)
+			if parseErr != nil {
+				// Both causes, or the user sees a parse error with no trace of the
+				// fetch failure that sent them to the stale cache.
+				return nil, fmt.Errorf("%w (after fetch failed: %w)", parseErr, err)
+			}
+			return table, nil
 		}
 		return nil, fmt.Errorf("fetching pricing: %w (no cached data available)", err)
 	}
@@ -90,6 +107,15 @@ func Load(cachedPath string, maxAge time.Duration) (*Table, error) {
 		return nil, fmt.Errorf("reading freshly cached pricing: %w", err)
 	}
 	return LoadFromJSON(data)
+}
+
+func hasCurrentCacheSchema(data []byte) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw[cacheSchemaKey]
+	return ok
 }
 
 // isFresh returns true if the file at path exists and was modified less than maxAge ago.
@@ -102,7 +128,7 @@ func isFresh(path string, maxAge time.Duration) bool {
 }
 
 // fetchAndFilter downloads the full LiteLLM pricing JSON from url,
-// filters to Anthropic models, and writes the result to outPath.
+// filters to Anthropic and OpenAI models, and writes the result to outPath.
 // Creates parent directories as needed.
 func fetchAndFilter(url, outPath string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -140,7 +166,7 @@ func fetchAndFilter(url, outPath string) error {
 		if err := json.Unmarshal(rawVal, &e); err != nil {
 			continue
 		}
-		if e.Provider != "anthropic" {
+		if e.Provider != "anthropic" && e.Provider != "openai" {
 			continue
 		}
 		filtered[name] = jsonEntry{
@@ -150,6 +176,7 @@ func fetchAndFilter(url, outPath string) error {
 			CacheReadCostPerToken:  e.CacheReadCostPerToken,
 		}
 	}
+	filtered[cacheSchemaKey] = jsonEntry{}
 
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return fmt.Errorf("creating cache dir: %w", err)

@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/jedib0t/go-pretty/v6/text"
 	"golang.org/x/term"
@@ -156,6 +155,18 @@ func yAxisLabels(maxValue float64, height int, useTokens bool) []string {
 }
 
 func formatCost(v float64) string {
+	// Sign outside the symbol, matching formatChartAmount: "$-5" reads as malformed.
+	if v < 0 {
+		return "-" + formatCost(-v)
+	}
+	// Tiers beyond "k": without them $1e12 renders as "$1000000000.0k" and the
+	// y-axis gutter grows to 14 columns.
+	if v >= 1e9 {
+		return fmt.Sprintf("$%.1fB", v/1e9)
+	}
+	if v >= 1e6 {
+		return fmt.Sprintf("$%.1fM", v/1e6)
+	}
 	if v >= 1000 {
 		return fmt.Sprintf("$%.1fk", v/1000)
 	}
@@ -187,8 +198,8 @@ func xAxisLabels(buckets []bucket, keyName string, barW int) []string {
 	if barW >= 2 {
 		maxLen := barW + 1
 		for i, l := range labels {
-			if len([]rune(l)) > maxLen {
-				labels[i] = truncateWithEllipsis(l, maxLen)
+			if text.StringWidth(l) > maxLen {
+				labels[i] = truncateToWidth(l, maxLen)
 			}
 		}
 	} else {
@@ -233,15 +244,27 @@ func formatXLabel(key, keyName string) string {
 	}
 }
 
-func truncateWithEllipsis(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
+// truncateToWidth trims s to at most max display columns, appending an ellipsis
+// when it had to cut. Width-aware so wide (CJK) glyphs are counted as the two
+// columns the terminal actually advances.
+func truncateToWidth(s string, max int) string {
+	if text.StringWidth(s) <= max {
 		return s
 	}
 	if max < 1 {
 		return ""
 	}
-	return string(r[:max-1]) + "…"
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		w := text.StringWidth(string(r))
+		if used+w > max-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String() + "…"
 }
 
 // chartPalette maps color index 0..5 to ANSI color sequences.
@@ -260,40 +283,267 @@ const chartBarRune = "█"
 const chartLegendRune = "■"
 const chartGutterWidth = 6 // right-aligned y-axis labels (minimum; grows via chartGutterFor)
 
+// maxChartHeight is far above any terminal but low enough that a typo cannot
+// allocate its way into a hang or a makeslice panic.
+const maxChartHeight = 1000
+
 // chartGutterFor returns the gutter width needed to fit y-axis labels.
 // It's at least chartGutterWidth (the default minimum) and grows to fit
 // the widest label produced by yAxisLabels.
+// Uses StringWidth for one rule across the file, though y-axis labels are
+// formatCost/formatTokenShort output and therefore ASCII by construction — this
+// site is uniformity, not a tested behaviour.
 func chartGutterFor(maxValue float64, height int, useTokens bool) int {
 	w := chartGutterWidth
 	for _, l := range yAxisLabels(maxValue, height, useTokens) {
-		if rw := utf8.RuneCountInString(l); rw > w {
+		if rw := text.StringWidth(l); rw > w {
 			w = rw
 		}
 	}
 	return w
 }
 
-// render draws the chart to w. Caller is responsible for ensuring color is
+// gridCell values below 0 are sentinels: -2 is an empty cell, -1 is the grey
+// "other" stack, and 0..len(chartPalette)-1 index the palette.
+const gridEmpty = -2
+
+// chartAccounting divides a bucket set's total into what the plot draws and what
+// it cannot. The two must sum to the bucket totals — see
+// TestBuildChartGrid_AccountsForEveryDollar, which is the guard against the
+// recurring failure of computing a quantity at one stage and displaying it at
+// another.
+type chartAccounting struct {
+	drawnCost float64
+	undrawn   float64
+	// blankBuckets counts columns that keep an x-axis label while drawing no
+	// bar at all, which otherwise reads as a period with no spend.
+	blankBuckets int
+}
+
+// chartGrid is buildChartGrid's output: the colour grid, the per-bucket segments
+// actually used for rendering (post-fold), which of them reached a cell, the
+// models whose name was lost to "other" everywhere, and the accounting.
+type chartGrid struct {
+	chartAccounting
+	grid     [][]int
+	rendered [][]segment
+	drawn    map[string]bool
+	merged   map[string]float64
+}
+
+func segmentKey(s segment) string { return fmt.Sprintf("%d|%s", s.color, s.model) }
+
+// buildChartGrid maps buckets onto a height-row grid and accounts for every unit
+// of the bucket totals along the way. Bars are quantized, so some spend inside
+// the announced total reaches no pixel: a bucket under about half a row of the
+// tallest, or a segment in a bar too short to lend it one.
+func buildChartGrid(buckets []bucket, height int, maxTotal float64) chartGrid {
+	g := chartGrid{
+		grid:     make([][]int, len(buckets)),
+		rendered: make([][]segment, len(buckets)),
+		drawn:    make(map[string]bool),
+		merged:   make(map[string]float64),
+	}
+	drawnModels := make(map[string]bool)
+	// Whether each bucket's post-fold "other" stack won a row. Where it did not,
+	// the folded money reached no pixel and belongs to undrawn, not to merged.
+	otherDrew := make([]bool, len(buckets))
+
+	for bi, b := range buckets {
+		g.grid[bi] = make([]int, height)
+		for r := range g.grid[bi] {
+			g.grid[bi][r] = gridEmpty
+		}
+		bucketHeight := int(math.Round(b.total / maxTotal * float64(height)))
+		if bucketHeight > height {
+			bucketHeight = height
+		}
+		// <= 0, not == 0: a negative total (a negative published rate) yields a
+		// negative height, which drew nothing and was counted nowhere.
+		if bucketHeight <= 0 {
+			g.blankBuckets++
+		}
+		segs, segH := foldSubThresholdSegments(b.segments, bucketHeight)
+		g.rendered[bi] = segs
+		// Bounded by bucketHeight, not just by the plot height: splitSegments
+		// clamps its leftover but not its total, so a negative segment can make
+		// the heights sum past the bar's own height and overdraw it.
+		// bucketHeight is already capped at height above.
+		drawable := bucketHeight
+		row := 0
+		for i, h := range segH {
+			if h == 0 {
+				g.undrawn += segs[i].cost
+				continue
+			}
+			if segs[i].color == -1 {
+				otherDrew[bi] = true
+			}
+			g.drawnCost += segs[i].cost
+			g.drawn[segmentKey(segs[i])] = true
+			drawnModels[segs[i].model] = true
+			for j := 0; j < h && row < drawable; j++ {
+				g.grid[bi][row] = segs[i].color
+				row++
+			}
+		}
+	}
+
+	// A model holding a palette colour that never wins a row anywhere keeps its
+	// money on the chart, inside the grey "other" stack, but loses its name.
+	// Only where that stack actually drew: otherwise the money is undrawn, and
+	// reporting it here would announce the same dollars twice with contradictory
+	// explanations — and point at a grey stack that is not on screen.
+	for bi, b := range buckets {
+		if !otherDrew[bi] {
+			continue
+		}
+		for _, s := range b.segments {
+			// s.cost > 0: an unpriced model contributes exactly 0 in cost mode, so
+			// it has no money inside "other" to go looking for. The separate
+			// "some models have no pricing" line already describes those.
+			if s.color != -1 && s.cost > 0 && !drawnModels[s.model] {
+				g.merged[s.model] += s.cost
+			}
+		}
+	}
+	return g
+}
+
+// formatChartAmount renders a chart quantity exactly, in whichever unit is being
+// plotted. Distinct from formatCost, whose "$1.2k" shorthand exists for y-axis
+// labels: a figure printed so the reader can reconcile it against the table must
+// not be rounded to three significant figures, since the rounding error can
+// exceed the amount being disclosed.
+func formatChartAmount(v float64, useTokens bool) string {
+	if useTokens {
+		return formatInt(int64(v))
+	}
+	// Sign outside the symbol: "$-30.00" reads as a malformed figure.
+	if v < 0 {
+		return fmt.Sprintf("-$%.2f", -v)
+	}
+	return fmt.Sprintf("$%.2f", v)
+}
+
+// plural picks a noun form without the caller repeating the count.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// reportUndrawn discloses spend counted in the title but too small to draw. It
+// covers quantization only — money dropped by bucket truncation has a different
+// cause and a different remedy, and is disclosed by FormatChart instead.
+func reportUndrawn(acct chartAccounting, o chartOpts) {
+	amount := formatChartAmount(acct.undrawn, o.useTokens)
+	// Below display precision the amount is noise, but a labelled blank column
+	// still reads as "no spend here", so the columns stay worth naming. A
+	// negative amount is not negligible — it is a real figure the plot cannot
+	// show — so only exact zero and sub-precision qualify.
+	// math.Abs: a small negative formats as "-$0.00", which never equals "$0.00",
+	// so comparing the strings let the exact spelling this code calls "a defect
+	// rather than a disclosure" through on the negative side.
+	negligible := formatChartAmount(math.Abs(acct.undrawn), o.useTokens) == formatChartAmount(0, o.useTokens)
+	if negligible && acct.blankBuckets == 0 {
+		return
+	}
+
+	var msg string
+	switch {
+	case negligible:
+		msg = fmt.Sprintf("%d %s nothing large enough to plot",
+			acct.blankBuckets, plural(acct.blankBuckets, "bucket has", "buckets have"))
+	case acct.blankBuckets > 0:
+		msg = fmt.Sprintf("%s is too small to plot, including %d empty %s",
+			amount, acct.blankBuckets, plural(acct.blankBuckets, "bucket", "buckets"))
+	default:
+		msg = fmt.Sprintf("%s is too small to plot", amount)
+	}
+	// Suggest a taller plot only when it could work: not at the height ceiling,
+	// and not when there is no amount to enlarge. A column of nothing but
+	// unpriced usage totals exactly zero, and no height draws that — the honest
+	// signal for it is the separate "some models have no pricing" line.
+	if o.height < maxChartHeight && acct.undrawn > 0 {
+		msg += "; raise --height for more detail"
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
+// bucketsMax returns the tallest bucket total. Zero means there is nothing to
+// draw, which render treats as a silent no-op — so callers must say so first.
+func bucketsMax(buckets []bucket) float64 {
+	var m float64
+	for _, b := range buckets {
+		if b.total > m {
+			m = b.total
+		}
+	}
+	return m
+}
+
+func reportNothingToPlot() {
+	fmt.Fprintln(os.Stderr, "nothing to plot: every bucket shown is zero")
+}
+
+// reportMergedModels discloses models whose money is drawn inside "other" but
+// whose name appears nowhere. Separate from reportUndrawn because this spend
+// *is* plotted — only the attribution is lost.
+func reportMergedModels(merged map[string]float64, o chartOpts) {
+	if len(merged) == 0 {
+		return
+	}
+	var total float64
+	for _, cost := range merged {
+		total += cost
+	}
+	// Below display precision there is no attribution worth reclaiming, and a
+	// note reading "($0.00)" looks like a defect rather than a disclosure.
+	if formatChartAmount(math.Abs(total), o.useTokens) == formatChartAmount(0, o.useTokens) {
+		return
+	}
+	msg := fmt.Sprintf(`%d %s merged into "other" (%s)`,
+		len(merged), plural(len(merged), "model", "models"),
+		formatChartAmount(total, o.useTokens))
+	if o.height < maxChartHeight {
+		msg += "; raise --height to name them"
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
+// chartOpts carries render's non-bucket inputs. A struct rather than positional
+// parameters because three of them are bools, where a call site says nothing
+// about which is which.
+type chartOpts struct {
+	height, width int
+	keyName       string
+	useTokens     bool
+	// costIncomplete drives the "*" marker: some rows have no known pricing.
+	costIncomplete bool
+	// grandTotal is the total across every bucket, including any FormatChart
+	// dropped to fit the width. The headline figure must match the table's, not
+	// just the part that fit.
+	grandTotal float64
+}
+
+// render draws the chart to w. Callers are responsible for ensuring color is
 // usable (FormatChart handles TTY/NO_COLOR detection upstream) and for
-// truncating buckets to fit width (FormatChart enforces
-// len(buckets) <= (width-chartGutterWidth-3)/2 — Task 7). Returns the first
-// write error encountered, if any.
-func render(w io.Writer, buckets []bucket, height, width int, keyName string, useTokens bool) error {
+// truncating buckets to fit the width. Returns the first write error
+// encountered, if any.
+func render(w io.Writer, buckets []bucket, o chartOpts) error {
+	height, width, keyName := o.height, o.width, o.keyName
+	useTokens := o.useTokens
 	if len(buckets) == 0 || height < 1 || width < 1 {
 		return nil
 	}
 
-	var maxTotal float64
-	var grandTotal float64
-	for _, b := range buckets {
-		grandTotal += b.total
-		if b.total > maxTotal {
-			maxTotal = b.total
-		}
-	}
+	maxTotal := bucketsMax(buckets)
 	if maxTotal <= 0 {
 		return nil
 	}
+	grandTotal := o.grandTotal
 
 	gutterW := chartGutterFor(maxTotal, height, useTokens)
 	leftOffset := gutterW + 3
@@ -313,43 +563,31 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		barW = 4
 	}
 
-	// Build per-bucket per-row color grid. -2 = empty, -1 = other, 0..5 = palette.
-	const empty = -2
-	grid := make([][]int, len(buckets))
-	for bi, b := range buckets {
-		grid[bi] = make([]int, height)
-		for r := range grid[bi] {
-			grid[bi][r] = empty
-		}
-		bucketHeight := int(math.Round(b.total / maxTotal * float64(height)))
-		if bucketHeight > height {
-			bucketHeight = height
-		}
-		costs := make([]float64, len(b.segments))
-		for i, s := range b.segments {
-			costs[i] = s.cost
-		}
-		segH := splitSegments(costs, bucketHeight)
-		row := 0
-		for i, h := range segH {
-			for j := 0; j < h && row < height; j++ {
-				grid[bi][row] = b.segments[i].color
-				row++
-			}
-		}
-	}
+	g := buildChartGrid(buckets, height, maxTotal)
+	grid, rendered, drawn := g.grid, g.rendered, g.drawn
+	reportUndrawn(g.chartAccounting, o)
+	reportMergedModels(g.merged, o)
 
-	// Title.
-	var title, totalStr string
+	// Title. The headline is stated exactly rather than abbreviated: it is the
+	// figure a reader reconciles against the table and against the disclosure
+	// lines, and "$3.0k" for $2961.81 is off by more than the amounts those
+	// lines carefully account for.
+	var title string
 	if useTokens {
 		title = fmt.Sprintf("Tokens by %s", keyName)
-		totalStr = formatTokenShort(grandTotal)
 	} else {
 		title = fmt.Sprintf("Cost by %s (USD)", keyName)
-		totalStr = formatCost(grandTotal)
 	}
+	totalStr := formatChartAmount(grandTotal, useTokens)
 	totalSuffix := fmt.Sprintf("Total: %s", totalStr)
-	titlePad := width - len(title) - len(totalSuffix)
+	if o.costIncomplete && !useTokens {
+		// Same marker the table uses, so the two formats agree in-band and not
+		// only on stderr. Token mode needs none: that total is complete.
+		totalSuffix += "*"
+	}
+	// Same note as chartGutterFor: the title is built from a validated --by
+	// value and a formatted amount, both ASCII, so this is uniformity only.
+	titlePad := width - text.StringWidth(title) - text.StringWidth(totalSuffix)
 	if titlePad < 2 {
 		titlePad = 2
 	}
@@ -367,7 +605,7 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		sb.WriteString(" │ ")
 		for bi := range buckets {
 			c := grid[bi][r]
-			if c == empty {
+			if c == gridEmpty {
 				sb.WriteString(strings.Repeat(" ", barW))
 			} else {
 				bar := strings.Repeat(chartBarRune, barW)
@@ -402,11 +640,14 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 		if bi == len(xLabels)-1 {
 			field = barW
 		}
-		if len([]rune(lbl)) > field {
-			lbl = truncateWithEllipsis(lbl, field)
+		// Display columns, not runes: a CJK project name advances the terminal
+		// two columns per rune, so rune-based padding drifts the whole row right
+		// of the bars it labels.
+		if text.StringWidth(lbl) > field {
+			lbl = truncateToWidth(lbl, field)
 		}
-		left := (field - len([]rune(lbl))) / 2
-		right := field - len([]rune(lbl)) - left
+		left := (field - text.StringWidth(lbl)) / 2
+		right := field - text.StringWidth(lbl) - left
 		if left < 0 {
 			left = 0
 		}
@@ -429,10 +670,10 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 	}
 	seen := make(map[string]bool)
 	var legend []legendEntry
-	for _, b := range buckets {
-		for _, s := range b.segments {
-			k := fmt.Sprintf("%d|%s", s.color, s.model)
-			if !seen[k] {
+	for _, segs := range rendered {
+		for _, s := range segs {
+			k := segmentKey(s)
+			if !seen[k] && drawn[k] {
 				seen[k] = true
 				legend = append(legend, legendEntry{color: s.color, model: s.model})
 			}
@@ -475,6 +716,29 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 	return nil
 }
 
+// ValidateChartOptions reports whether the chart bounds are usable. Exported so
+// the CLI can reject them before scanning session logs rather than after.
+func ValidateChartOptions(height, topN int) error {
+	if height < 6 {
+		return fmt.Errorf("--height must be at least 6")
+	}
+	// yAxisLabels allocates one entry per row unconditionally, so an unbounded
+	// height hangs on a large value and panics in makeslice on a huge one.
+	if height > maxChartHeight {
+		return fmt.Errorf("--height must be at most %d", maxChartHeight)
+	}
+	if topN < 1 {
+		return fmt.Errorf("--top must be at least 1")
+	}
+	// assignColors hands out indices 0..topN-1 and render indexes chartPalette
+	// with them, so anything above the palette size is a panic waiting for a
+	// model at that index to draw a row.
+	if topN > len(chartPalette) {
+		return fmt.Errorf("--top must be at most %d", len(chartPalette))
+	}
+	return nil
+}
+
 // FormatChart writes a vertical stacked bar chart to w. keyName matches the
 // --by value (used for x-axis labeling). height is the plot height (minimum 6).
 // topN is the maximum number of distinct model stacks (minimum 1).
@@ -484,11 +748,8 @@ func render(w io.Writer, buckets []bucket, height, width int, keyName string, us
 //   - NO_COLOR env var is set
 //   - terminal width is too narrow for a chart
 func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) error {
-	if height < 6 {
-		return fmt.Errorf("--height must be at least 6")
-	}
-	if topN < 1 {
-		return fmt.Errorf("--top must be at least 1")
+	if err := ValidateChartOptions(height, topN); err != nil {
+		return err
 	}
 	if len(rows) == 0 {
 		return nil
@@ -500,37 +761,59 @@ func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) erro
 		return nil
 	}
 
-	width := chartTerminalWidth(w)
+	width := chartWidthOf(w)
 	if width < 30 {
 		fmt.Fprintln(os.Stderr, "terminal too narrow for chart; falling back to table")
 		FormatTable(w, rows, keyName)
 		return nil
 	}
 
-	var hasAnyCost bool
+	var hasAnyCost, anyRowLacksCost bool
+	var totalCost float64
 	for _, r := range rows {
 		if r.HasCost {
 			hasAnyCost = true
-			break
+			totalCost += r.Cost
+		} else {
+			anyRowLacksCost = true
 		}
 	}
 	metric := costMetric
 	useTokens := false
-	if !hasAnyCost {
+	switch {
+	case !hasAnyCost:
 		fmt.Fprintln(os.Stderr, "no pricing data for any model; charting tokens instead of cost")
 		metric = tokenMetric
 		useTokens = true
+	case totalCost == 0:
+		// Priced, but at zero — the cache carries zero-rate entries. A cost chart
+		// would render nothing at all, which reads as failure rather than as $0.
+		fmt.Fprintln(os.Stderr, "every priced model costs zero; charting tokens instead of cost")
+		metric = tokenMetric
+		useTokens = true
+	case anyRowLacksCost:
+		// Signalled twice on purpose: the title carries table's "*" marker for
+		// anyone reading the chart, and this line survives being scrolled past.
+		fmt.Fprintln(os.Stderr, "some models have no pricing; chart total excludes them")
 	}
 
 	colors := assignColors(rows, topN, metric)
 	buckets := bucketize(rows, colors, keyName, metric)
 
-	var maxTotal float64
+	// Captured before any truncation below: the headline total reports the whole
+	// report, matching the table, while the plot shows what fits.
+	var maxTotal, grandTotal float64
 	for _, b := range buckets {
+		grandTotal += b.total
 		if b.total > maxTotal {
 			maxTotal = b.total
 		}
 	}
+	if maxTotal <= 0 {
+		reportNothingToPlot()
+		return nil
+	}
+
 	gutterW := chartGutterFor(maxTotal, height, useTokens)
 	plotWidth := width - gutterW - 3
 	maxBuckets := plotWidth / 2
@@ -538,12 +821,19 @@ func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) erro
 		maxBuckets = 1
 	}
 	if len(buckets) > maxBuckets {
-		dropped := len(buckets) - maxBuckets
+		total := len(buckets)
 		switch keyName {
 		case "day", "week", "month":
 			buckets = buckets[len(buckets)-maxBuckets:]
 		default:
 			buckets = buckets[:maxBuckets]
+		}
+		// Named, not just counted. The headline includes these buckets, so a bare
+		// count leaves the reader to infer the gap — and next to the quantization
+		// note, which is usually far smaller, a count reads as the lesser figure.
+		var shown float64
+		for _, b := range buckets {
+			shown += b.total
 		}
 		hint := "--since/--last"
 		switch keyName {
@@ -552,11 +842,35 @@ func FormatChart(w io.Writer, rows []Row, keyName string, height, topN int) erro
 		case "session":
 			hint = "--project/--model"
 		}
-		fmt.Fprintf(os.Stderr, "showing %d of %d buckets; narrow with %s\n",
-			maxBuckets, maxBuckets+dropped, hint)
+		// The amount is omitted rather than printed as "$0.00", which reads as a
+		// defect; the count and the remedy still stand on their own.
+		dropped := ""
+		if amount := formatChartAmount(grandTotal-shown, useTokens); formatChartAmount(math.Abs(grandTotal-shown), useTokens) != formatChartAmount(0, useTokens) {
+			dropped = fmt.Sprintf(" (%s not plotted)", amount)
+		}
+		fmt.Fprintf(os.Stderr, "showing %d of %d buckets%s; narrow with %s\n",
+			maxBuckets, total, dropped, hint)
 	}
 
-	return render(w, buckets, height, width, keyName, useTokens)
+	// Truncation keeps the newest buckets for time keys, so the tallest can be
+	// among the ones dropped. Re-check against the survivors, or render returns
+	// silently after FormatChart has already promised output on stderr.
+	// Recomputed rather than passed into render: a chartOpts field would have to
+	// stay in agreement with the buckets beside it, and disagreeing renders an
+	// empty chart silently. One loop over at most 35 buckets is the cheaper risk.
+	if bucketsMax(buckets) <= 0 {
+		reportNothingToPlot()
+		return nil
+	}
+
+	return render(w, buckets, chartOpts{
+		height:         height,
+		width:          width,
+		keyName:        keyName,
+		useTokens:      useTokens,
+		costIncomplete: anyRowLacksCost,
+		grandTotal:     grandTotal,
+	})
 }
 
 // chartColorAllowed reports whether ANSI color output should be emitted.
@@ -574,6 +888,11 @@ func chartColorAllowed(w io.Writer) bool {
 	return false
 }
 
+// chartWidthOf is a var so tests can drive the narrow-terminal fallback and the
+// bucket clamp, which are otherwise unreachable: every test writes to a
+// bytes.Buffer, for which chartTerminalWidth always answers 80.
+var chartWidthOf = chartTerminalWidth
+
 // chartTerminalWidth returns the columns reported by the OS for w if it's a
 // terminal, or 80 otherwise.
 func chartTerminalWidth(w io.Writer) int {
@@ -583,6 +902,85 @@ func chartTerminalWidth(w io.Writer) int {
 		}
 	}
 	return 80
+}
+
+// foldSubThresholdSegments merges segments too small to draw a row into the
+// bucket's "other" segment, then re-splits. Without it, sub-threshold spend
+// disappears from the chart entirely — no bar and, once the legend is filtered
+// to what renders, no legend entry either. Returns the segments to render and
+// their row heights, which stay index-aligned.
+func foldSubThresholdSegments(segments []segment, bucketHeight int) ([]segment, []int) {
+	costsOf := func(segs []segment) []float64 {
+		costs := make([]float64, len(segs))
+		for i, s := range segs {
+			costs[i] = s.cost
+		}
+		return costs
+	}
+
+	kept := segments
+	segH := splitSegments(costsOf(kept), bucketHeight)
+
+	// Merging raises the "other" floor, which can push a segment that drew before
+	// the fold below it — leaving that cost in neither a bar of its own nor in
+	// "other". So repeat until nothing new falls through. Each pass that folds
+	// anything removes at least one segment, making len(segments) a sufficient
+	// bound. One exception: when the foldable segments *sum* to 0 — including a
+	// mix such as {+5, -5} — the loop breaks on `folded == 0` with them still
+	// present. Nothing is lost from the total, but "no non-other segment survives
+	// at zero rows" holds only while the foldable set does not sum to zero.
+	for range len(segments) {
+		var folded float64
+		next := make([]segment, 0, len(kept))
+		for i, s := range kept {
+			if segH[i] == 0 && s.color != -1 {
+				folded += s.cost
+				continue
+			}
+			next = append(next, s)
+		}
+		if folded == 0 {
+			break
+		}
+		otherIdx := -1
+		for i := range next {
+			if next[i].color == -1 {
+				otherIdx = i
+				break
+			}
+		}
+		if otherIdx >= 0 {
+			next[otherIdx].cost += folded
+		} else {
+			next = append(next, segment{model: "other", color: -1, cost: folded})
+		}
+		// Restore the bottom-up cost-desc stacking convention after the merge.
+		sort.SliceStable(next, func(i, j int) bool { return next[i].cost > next[j].cost })
+		kept = next
+		segH = splitSegments(costsOf(kept), bucketHeight)
+	}
+
+	// A merged "other" too small to win a row would be dropped by the caller's
+	// drawn filter, putting the folded spend back exactly where it started:
+	// absent from both plot and legend. Borrow a row from the tallest segment so
+	// the bar still accounts for every dollar in it.
+	for i, s := range kept {
+		if s.color != -1 || s.cost <= 0 || segH[i] != 0 {
+			continue
+		}
+		tallest := 0
+		for j, h := range segH {
+			if h > segH[tallest] {
+				tallest = j
+			}
+		}
+		if segH[tallest] > 1 {
+			segH[tallest]--
+			segH[i] = 1
+		}
+		break
+	}
+	return kept, segH
 }
 
 // splitSegments allocates totalRows among segments using Hamilton's
